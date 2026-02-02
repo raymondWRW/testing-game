@@ -60,36 +60,47 @@ func _create_tilemap() -> void:
 	add_child(tile_map)
 
 func _build_house() -> void:
-	# Tile the 4x2 pattern across the entire house area
-	# Pattern width = 4, pattern height = 2
-	var pattern_w := 4
-	var pattern_h := 2
-
 	# Offset to center the house around position (0,0)
 	var offset_x := -house_width / 2
 	var offset_y := -house_height / 2
 
+	# Door position (bottom edge, center)
+	var door_x := house_width / 2
+
 	for y in range(house_height):
 		for x in range(house_width):
-			var tile_x := x % pattern_w
-			var tile_y := y % pattern_h
 			var tile_coord: Vector2i
+			var is_edge := (x == 0 or x == house_width - 1 or y == 0 or y == house_height - 1)
 
-			# Map pattern position to tile
-			if tile_y == 0:
-				# Top row: (0,5), (1,5), (2,5), then repeat (2,5) for position 3
-				match tile_x:
-					0: tile_coord = TILE_TOP_0
-					1: tile_coord = TILE_TOP_1
-					2: tile_coord = TILE_TOP_2
-					_: tile_coord = TILE_TOP_2  # Repeat last tile
+			if is_edge:
+				# Edge tiles - walls
+				if x == door_x and y == house_height - 1:
+					# Door on bottom edge
+					tile_coord = DOOR
+				elif x == 0:
+					# Left edge
+					tile_coord = WALL_LEFT
+				elif x == house_width - 1:
+					# Right edge
+					tile_coord = WALL_RIGHT
+				else:
+					# Top/bottom edges
+					tile_coord = WALL_MID
 			else:
-				# Bottom row: (0,6), (1,6), (2,6), (3,6)
-				match tile_x:
-					0: tile_coord = TILE_BOT_0
-					1: tile_coord = TILE_BOT_1
-					2: tile_coord = TILE_BOT_2
-					_: tile_coord = TILE_BOT_3
+				# Interior - roof tiles
+				var roof_row := y % 2
+				var roof_col := x % 3
+
+				if roof_row == 0:
+					match roof_col:
+						0: tile_coord = ROOF_TOP_LEFT
+						1: tile_coord = ROOF_TOP_MID
+						_: tile_coord = ROOF_TOP_RIGHT
+				else:
+					match roof_col:
+						0: tile_coord = ROOF_BOT_LEFT
+						1: tile_coord = ROOF_BOT_MID
+						_: tile_coord = ROOF_BOT_RIGHT
 
 			tile_map.set_cell(Vector2i(x + offset_x, y + offset_y), source_id, tile_coord)
 
