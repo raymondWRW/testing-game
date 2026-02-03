@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TownData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/town_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"market"
+town_name = "Ironmarket"
+town_seed = 99999
+width = 200
+height = 120
+num_houses = 10
+num_farms = 2
+plot_margin = 2
+road_width = 3
+metadata = {}

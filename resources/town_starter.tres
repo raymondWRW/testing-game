@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="TownData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/town_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"starter"
+town_name = "Greenhollow"
+town_seed = 12345
+width = 160
+height = 100
+num_houses = 6
+num_farms = 4
+plot_margin = 2
+road_width = 2
+metadata = {}

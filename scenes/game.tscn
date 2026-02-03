@@ -1,8 +1,11 @@
-[gd_scene load_steps=6 format=3 uid="uid://dapbuqr3t47cr"]
+[gd_scene load_steps=9 format=3 uid="uid://dapbuqr3t47cr"]
 
 [ext_resource type="PackedScene" uid="uid://bka5ow6j8cqgt" path="res://scenes/player.tscn" id="1_uwrxv"]
 [ext_resource type="Texture2D" uid="uid://dbb2bg7et52x2" path="res://assets/Tilemap/tilemap_packed.png" id="2_lnu2h"]
 [ext_resource type="Script" uid="uid://6eoo4orwpiru" path="res://scripts/ground.gd" id="3_lbhrr"]
+[ext_resource type="Script" path="res://scripts/world.gd" id="4_world"]
+[ext_resource type="Resource" path="res://resources/town_starter.tres" id="5_starter"]
+[ext_resource type="Resource" path="res://resources/town_market.tres" id="6_market"]
 
 [sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_yqjtg"]
 texture = ExtResource("2_lnu2h")
@@ -29,8 +32,11 @@ sources/0 = SubResource("TileSetAtlasSource_yqjtg")
 [node name="Camera2D" type="Camera2D" parent="player"]
 
 [node name="world" type="Node2D" parent="."]
+script = ExtResource("4_world")
+towns = [ExtResource("5_starter"), ExtResource("6_market")]
 
 [node name="ground" type="TileMapLayer" parent="world"]
 z_index = -10
 tile_set = SubResource("TileSet_lnu2h")
 script = ExtResource("3_lbhrr")
+auto_generate = false

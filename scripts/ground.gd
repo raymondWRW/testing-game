@@ -6,6 +6,10 @@ extends TileMapLayer
 @export var world_seed: int = 12345
 @export var use_random_seed := false
 
+## When true, generate() is called automatically in _ready().
+## Set to false when the World node manages generation.
+@export var auto_generate: bool = true
+
 @export var source_id := 0
 
 # Pick atlas coords that exist in your TileSet
@@ -39,10 +43,9 @@ const FARM_SIZE  := Vector2i(12, 21)
 @export var num_farms := 4
 @export var plot_margin := 2      # spacing between plots
 @export var road_width := 2       # thickness of roads in tiles
-@export var num_npcs := 5         # number of NPCs to spawn
 
-var npc_texture := preload("res://assets/Spritesheet/roguelikeChar_transparent.png")
 var house_scene := preload("res://scenes/house.tscn")
+var npc_scene := preload("res://scenes/npc.tscn")
 
 var rng := RandomNumberGenerator.new()
 var all_plots: Array[Plot] = []  # Store all plots for intersection checking
@@ -55,16 +58,18 @@ class Plot:
 	var center: Vector2i
 	var type: String  # "house" or "farm"
 	var door_position: Vector2i  # for houses only
-	func _init(r: Rect2i, plot_type: String = "house"):
+	var _map_center: Vector2i
+	func _init(r: Rect2i, plot_type: String = "house", map_center: Vector2i = Vector2i(80, 50)):
 		rect = r
 		center = r.position + (r.size / 2)
 		type = plot_type
+		_map_center = map_center
 		if type == "house":
 			_calculate_door_position()
-	
+
 	func _calculate_door_position():
 		# Place door on the side closest to map center
-		var map_center := Vector2i(80, 50)  # approximate center
+		var map_center := _map_center
 		var distances := []
 		
 		# Check all four sides
@@ -86,6 +91,9 @@ class Plot:
 		door_position = sides[closest_side]
 
 func _ready():
+	if not auto_generate:
+		return
+
 	if use_random_seed:
 		rng.randomize()
 		world_seed = rng.randi()
@@ -94,7 +102,19 @@ func _ready():
 
 	generate()
 
-func generate():
+func generate(town: TownData = null) -> void:
+	if town != null:
+		width = town.width
+		height = town.height
+		world_seed = town.town_seed
+		use_random_seed = false
+		num_houses = town.num_houses
+		num_farms = town.num_farms
+		plot_margin = town.plot_margin
+		road_width = town.road_width
+
+	rng.seed = world_seed
+
 	clear()
 	occupied.clear()
 	all_plots.clear()
@@ -219,7 +239,7 @@ func _place_farms_in_edge_zones(plots: Array) -> void:
 		var rect := Rect2i(Vector2i(x, y), FARM_SIZE)
 		
 		if _rect_free(rect, plot_margin):
-			plots.append(Plot.new(rect, "farm"))
+			plots.append(Plot.new(rect, "farm", Vector2i(width / 2, height / 2)))
 			_mark_rect(rect, plot_margin)
 			farms_placed += 1
 
@@ -246,7 +266,7 @@ func _place_houses_in_center_zone(plots: Array) -> void:
 		var rect := Rect2i(Vector2i(x, y), HOUSE_SIZE)
 		
 		if _rect_free(rect, plot_margin):
-			plots.append(Plot.new(rect, "house"))
+			plots.append(Plot.new(rect, "house", Vector2i(width / 2, height / 2)))
 			_mark_rect(rect, plot_margin)
 			houses_placed += 1
 
@@ -573,23 +593,25 @@ func _spawn_npcs() -> void:
 		if child.is_in_group("npcs"):
 			child.queue_free()
 
-	var spawned := 0
-	var attempts := 0
+	# Collect house and farm plots separately
+	var house_plots: Array[Plot] = []
+	var farm_plots: Array[Plot] = []
+	for plot in all_plots:
+		if plot.type == "house":
+			house_plots.append(plot)
+		elif plot.type == "farm":
+			farm_plots.append(plot)
 
-	while spawned < num_npcs and attempts < 1000:
-		attempts += 1
+	# Spawn one NPC per house, assign farms in order
+	for i in range(house_plots.size()):
+		var house_plot: Plot = house_plots[i]
+		var npc_instance = npc_scene.instantiate()
+		npc_instance.add_to_group("npcs")
 
-		# Pick a random cell that's not occupied (grass only)
-		var x := rng.randi_range(0, width - 1)
-		var y := rng.randi_range(0, height - 1)
-		var cell := Vector2i(x, y)
+		var home_pos: Vector2 = map_to_local(house_plot.door_position)
+		var farm_pos := Vector2.ZERO
+		if i < farm_plots.size():
+			farm_pos = map_to_local(farm_plots[i].center)
 
-		if not occupied.has(cell):
-			var npc := Sprite2D.new()
-			npc.texture = npc_texture
-			npc.region_enabled = true
-			npc.region_rect = Rect2(0, 0, 17, 18)  # Same atlas region as player
-			npc.position = map_to_local(cell)
-			npc.add_to_group("npcs")
-			add_child(npc)
-			spawned += 1
+		add_child(npc_instance)
+		npc_instance.initialize(home_pos, farm_pos)
