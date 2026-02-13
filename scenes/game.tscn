@@ -1,4 +1,4 @@
-[gd_scene load_steps=9 format=3 uid="uid://dapbuqr3t47cr"]
+[gd_scene load_steps=10 format=3 uid="uid://dapbuqr3t47cr"]
 
 [ext_resource type="PackedScene" uid="uid://bka5ow6j8cqgt" path="res://scenes/player.tscn" id="1_uwrxv"]
 [ext_resource type="Texture2D" uid="uid://dbb2bg7et52x2" path="res://assets/Tilemap/tilemap_packed.png" id="2_lnu2h"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://scripts/world.gd" id="4_world"]
 [ext_resource type="Resource" path="res://resources/town_starter.tres" id="5_starter"]
 [ext_resource type="Resource" path="res://resources/town_market.tres" id="6_market"]
+[ext_resource type="Texture2D" path="res://assets/farm/wheat.jpg" id="7_wheat"]
 
 [sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_yqjtg"]
 texture = ExtResource("2_lnu2h")
@@ -22,8 +23,77 @@ texture = ExtResource("2_lnu2h")
 1:3/0 = 0
 2:3/0 = 0
 
+[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_wheat"]
+texture = ExtResource("7_wheat")
+texture_region_size = Vector2i(16, 16)
+0:0/0 = 0
+1:0/0 = 0
+2:0/0 = 0
+3:0/0 = 0
+4:0/0 = 0
+5:0/0 = 0
+6:0/0 = 0
+7:0/0 = 0
+0:1/0 = 0
+1:1/0 = 0
+2:1/0 = 0
+3:1/0 = 0
+4:1/0 = 0
+5:1/0 = 0
+6:1/0 = 0
+7:1/0 = 0
+0:2/0 = 0
+1:2/0 = 0
+2:2/0 = 0
+3:2/0 = 0
+4:2/0 = 0
+5:2/0 = 0
+6:2/0 = 0
+7:2/0 = 0
+0:3/0 = 0
+1:3/0 = 0
+2:3/0 = 0
+3:3/0 = 0
+4:3/0 = 0
+5:3/0 = 0
+6:3/0 = 0
+7:3/0 = 0
+0:4/0 = 0
+1:4/0 = 0
+2:4/0 = 0
+3:4/0 = 0
+4:4/0 = 0
+5:4/0 = 0
+6:4/0 = 0
+7:4/0 = 0
+0:5/0 = 0
+1:5/0 = 0
+2:5/0 = 0
+3:5/0 = 0
+4:5/0 = 0
+5:5/0 = 0
+6:5/0 = 0
+7:5/0 = 0
+0:6/0 = 0
+1:6/0 = 0
+2:6/0 = 0
+3:6/0 = 0
+4:6/0 = 0
+5:6/0 = 0
+6:6/0 = 0
+7:6/0 = 0
+0:7/0 = 0
+1:7/0 = 0
+2:7/0 = 0
+3:7/0 = 0
+4:7/0 = 0
+5:7/0 = 0
+6:7/0 = 0
+7:7/0 = 0
+
 [sub_resource type="TileSet" id="TileSet_lnu2h"]
 sources/0 = SubResource("TileSetAtlasSource_yqjtg")
+sources/1 = SubResource("TileSetAtlasSource_wheat")
 
 [node name="game" type="Node2D"]
 

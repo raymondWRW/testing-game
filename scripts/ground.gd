@@ -11,12 +11,16 @@ extends TileMapLayer
 @export var auto_generate: bool = true
 
 @export var source_id := 0
+@export var wheat_source_id := 1
 
 # Pick atlas coords that exist in your TileSet
 # Grass tiles - plain and detailed variants
 @export var grass_plain: Vector2i = Vector2i(0, 0)
 @export var grass_detail: Vector2i = Vector2i(1, 0)  # 10% chance
 @export var grass_detail_chance: float = 0.1
+
+# Wheat tile settings (uses 8x8 grid of 16x16 tiles from wheat.jpg)
+@export var wheat_tile_size: Vector2i = Vector2i(8, 8)  # grid size in the wheat atlas
 
 # Dirt/road center tile
 @export var dirt_center: Vector2i = Vector2i(1, 2)
@@ -35,6 +39,15 @@ extends TileMapLayer
 # Track road cells for smoothing pass
 var road_cells := {}
 
+# Tree tiles (from tilemap_packed.png)
+@export var tree_tile_1: Vector2i = Vector2i(0, 5)  # First tree variant
+@export var tree_tile_2: Vector2i = Vector2i(1, 5)  # Second tree variant
+
+# Tree settings
+@export var num_decoration_trees := 20  # Trees near roads for decoration
+@export var num_logging_trees := 30     # Trees at edges for logging
+@export var tree_road_distance := 3     # Max distance from road for decoration trees
+
 # Plot sizes (W x H in tiles)
 const HOUSE_SIZE := Vector2i(8, 12)
 const FARM_SIZE  := Vector2i(12, 21)
@@ -52,6 +65,12 @@ var all_plots: Array[Plot] = []  # Store all plots for intersection checking
 
 # occupied cells (plots + roads)
 var occupied := {} # Dictionary used like a set: occupied[cell] = true
+
+# Track tree positions for navigation obstacles
+var tree_cells: Array[Vector2i] = []
+
+# Track NPC to farm mapping (NPC instance -> farm Plot)
+var npc_farm_map: Dictionary = {}
 
 class Plot:
 	var rect: Rect2i
@@ -119,6 +138,7 @@ func generate(town: TownData = null) -> void:
 	occupied.clear()
 	all_plots.clear()
 	road_cells.clear()
+	tree_cells.clear()
 
 	# 1) Fill entire map with grass first (10% chance for detailed grass)
 	for y in range(height):
@@ -155,16 +175,25 @@ func generate(town: TownData = null) -> void:
 	# 6) Smooth road edges and corners
 	_smooth_roads()
 
-	# Move player to map center
-	var player := get_node("../../player") as Node2D
-	var center_cell := Vector2i(width / 2, height / 2)
-	player.global_position = to_global(map_to_local(center_cell))
+	# 7) Spawn trees (decoration near roads, logging at edges)
+	_spawn_decoration_trees()
+	_spawn_logging_trees()
 
-	# Add collision to house walls
+	# Move player to map center (if player exists)
+	var player := get_node_or_null("../../player") as Node2D
+	if player:
+		var center_cell := Vector2i(width / 2, height / 2)
+		player.global_position = to_global(map_to_local(center_cell))
+
+	# Add collision to house walls and trees
 	_add_house_collisions()
+	_add_tree_collisions()
 
 	# Spawn house visuals
 	_spawn_houses()
+
+	# Set up navigation mesh for pathfinding (includes trees as obstacles)
+	_setup_navigation()
 
 	# Spawn NPCs
 	_spawn_npcs()
@@ -476,6 +505,117 @@ func _get_road_tile_for_cell(cell: Vector2i) -> Vector2i:
 	# Center (surrounded by road)
 	return dirt_center
 
+# ---------- tree spawning ----------
+
+func _spawn_decoration_trees() -> void:
+	# Spawn trees near roads for decoration
+	var attempts := 0
+	var trees_placed := 0
+
+	while trees_placed < num_decoration_trees and attempts < 2000:
+		attempts += 1
+
+		# Find a random position near a road
+		var road_cell: Vector2i = road_cells.keys()[rng.randi() % road_cells.size()]
+
+		# Offset from road by 1-3 tiles
+		var offset := Vector2i(
+			rng.randi_range(-tree_road_distance, tree_road_distance),
+			rng.randi_range(-tree_road_distance, tree_road_distance)
+		)
+		var tree_pos := road_cell + offset
+
+		# Check if position is valid (on grass, not occupied)
+		if _is_valid_tree_position(tree_pos):
+			_place_tree(tree_pos)
+			trees_placed += 1
+
+func _spawn_logging_trees() -> void:
+	# Spawn trees at map edges for logging (similar to farm placement)
+	var edge_width := width / 5
+	var edge_height := height / 5
+
+	var edge_zones := [
+		Rect2i(0, 0, width, edge_height),  # top edge
+		Rect2i(0, height - edge_height, width, edge_height),  # bottom edge
+		Rect2i(0, edge_height, edge_width, height - 2 * edge_height),  # left edge
+		Rect2i(width - edge_width, edge_height, edge_width, height - 2 * edge_height)  # right edge
+	]
+
+	var attempts := 0
+	var trees_placed := 0
+
+	while trees_placed < num_logging_trees and attempts < 3000:
+		attempts += 1
+
+		# Pick random edge zone
+		var zone: Rect2i = edge_zones[rng.randi_range(0, edge_zones.size() - 1)]
+
+		# Random position in zone
+		var tree_pos := Vector2i(
+			rng.randi_range(zone.position.x, zone.position.x + zone.size.x - 1),
+			rng.randi_range(zone.position.y, zone.position.y + zone.size.y - 1)
+		)
+
+		# Check if position is valid
+		if _is_valid_tree_position(tree_pos):
+			_place_tree(tree_pos)
+			trees_placed += 1
+
+func _is_valid_tree_position(pos: Vector2i) -> bool:
+	# Check bounds
+	if pos.x < 0 or pos.y < 0 or pos.x >= width or pos.y >= height:
+		return false
+
+	# Check if already occupied (by road, building, or another tree)
+	if occupied.has(pos):
+		return false
+
+	# Check if it's on grass (not on road or building)
+	var current_tile := get_cell_atlas_coords(pos)
+	if current_tile != grass_plain and current_tile != grass_detail:
+		return false
+
+	# Check spacing from other trees (at least 2 tiles apart)
+	for tree_cell in tree_cells:
+		if pos.distance_to(tree_cell) < 2:
+			return false
+
+	return true
+
+func _place_tree(pos: Vector2i) -> void:
+	# Randomly pick tree variant
+	var tree_tile: Vector2i
+	if rng.randf() > 0.5:
+		tree_tile = tree_tile_1
+	else:
+		tree_tile = tree_tile_2
+
+	set_cell(pos, source_id, tree_tile)
+	occupied[pos] = true
+	tree_cells.append(pos)
+
+func _add_tree_collisions() -> void:
+	# Remove existing tree collisions (in case of regeneration)
+	for child in get_children():
+		if child.is_in_group("tree_collisions"):
+			child.queue_free()
+
+	var tile_size := tile_set.tile_size
+
+	for tree_pos in tree_cells:
+		var body := StaticBody2D.new()
+		body.add_to_group("tree_collisions")
+
+		var shape := CollisionShape2D.new()
+		var circle := CircleShape2D.new()
+		circle.radius = tile_size.x * 0.4  # Slightly smaller than tile
+		shape.shape = circle
+
+		body.add_child(shape)
+		body.position = map_to_local(tree_pos)
+		add_child(body)
+
 # ---------- house collisions ----------
 
 func _add_house_collisions() -> void:
@@ -585,6 +725,91 @@ func _spawn_houses() -> void:
 		house_instance.position = map_to_local(plot_center)
 		add_child(house_instance)
 
+# ---------- navigation setup ----------
+
+func _setup_navigation() -> void:
+	# Remove existing navigation region (in case of regeneration)
+	for child in get_children():
+		if child.is_in_group("nav_region"):
+			child.queue_free()
+
+	var tile_size := tile_set.tile_size
+	var nav_region := NavigationRegion2D.new()
+	nav_region.add_to_group("nav_region")
+
+	var nav_poly := NavigationPolygon.new()
+
+	# Set agent radius for buffer around obstacles (one tile width)
+	nav_poly.agent_radius = float(tile_size.x)
+
+	# Collect all house rectangles for obstacle avoidance
+	var house_rects: Array[Rect2] = []
+	for plot in all_plots:
+		if plot.type == "house":
+			var rect: Rect2i = plot.rect
+			var house_top_left := map_to_local(rect.position) - Vector2(tile_size) / 2
+			var house_size := Vector2(rect.size) * Vector2(tile_size)
+			# Add padding of one tile around houses so NPCs stay away
+			var padding := float(tile_size.x)
+			house_rects.append(Rect2(
+				house_top_left - Vector2(padding, padding),
+				house_size + Vector2(padding * 2, padding * 2)
+			))
+
+	# Create navigation polygons for each row, avoiding houses
+	var map_top_left := map_to_local(Vector2i(0, 0)) - Vector2(tile_size) / 2
+	var map_bottom_right := map_to_local(Vector2i(width, height)) + Vector2(tile_size) / 2
+
+	# Simple approach: create one big polygon with the map bounds
+	var map_outline := PackedVector2Array()
+	map_outline.append(map_top_left)
+	map_outline.append(Vector2(map_top_left.x, map_bottom_right.y))
+	map_outline.append(map_bottom_right)
+	map_outline.append(Vector2(map_bottom_right.x, map_top_left.y))
+	nav_poly.add_outline(map_outline)
+
+	# Add house outlines as holes (opposite winding)
+	for house_rect in house_rects:
+		var hole := PackedVector2Array()
+		# Clockwise for holes
+		hole.append(house_rect.position)
+		hole.append(Vector2(house_rect.position.x + house_rect.size.x, house_rect.position.y))
+		hole.append(house_rect.position + house_rect.size)
+		hole.append(Vector2(house_rect.position.x, house_rect.position.y + house_rect.size.y))
+		nav_poly.add_outline(hole)
+
+	# Add tree outlines as holes (small squares with padding)
+	var tree_padding := float(tile_size.x)  # One tile buffer around trees
+	for tree_pos in tree_cells:
+		var tree_center := map_to_local(tree_pos)
+		var half_size := tree_padding
+		var tree_hole := PackedVector2Array()
+		# Clockwise for holes
+		tree_hole.append(tree_center + Vector2(-half_size, -half_size))
+		tree_hole.append(tree_center + Vector2(half_size, -half_size))
+		tree_hole.append(tree_center + Vector2(half_size, half_size))
+		tree_hole.append(tree_center + Vector2(-half_size, half_size))
+		nav_poly.add_outline(tree_hole)
+
+	# Bake the navigation mesh
+	nav_poly.make_polygons_from_outlines()
+	nav_region.navigation_polygon = nav_poly
+
+	# Make sure navigation region is enabled and visible
+	nav_region.enabled = true
+	add_child(nav_region)
+
+	# Debug: print navigation info
+	print("Navigation setup complete.")
+	print("  - Outlines: ", nav_poly.get_outline_count())
+	print("  - Polygons: ", nav_poly.get_polygon_count())
+	print("  - Houses blocked: ", house_rects.size())
+	print("  - Trees blocked: ", tree_cells.size())
+
+	# Force navigation map update
+	await get_tree().physics_frame
+	print("  - Navigation map ready")
+
 # ---------- NPC spawning ----------
 
 func _spawn_npcs() -> void:
@@ -603,15 +828,43 @@ func _spawn_npcs() -> void:
 			farm_plots.append(plot)
 
 	# Spawn one NPC per house, assign farms in order
+	var tile_size := tile_set.tile_size
 	for i in range(house_plots.size()):
 		var house_plot: Plot = house_plots[i]
 		var npc_instance = npc_scene.instantiate()
 		npc_instance.add_to_group("npcs")
 
-		var home_pos: Vector2 = map_to_local(house_plot.door_position)
+		# Calculate home position outside the house (offset from door)
+		var door_pos: Vector2 = map_to_local(house_plot.door_position)
+		var house_center: Vector2 = map_to_local(house_plot.center)
+		var door_direction := (door_pos - house_center).normalized()
+		# Offset 2 tiles away from the door, outside the house
+		var home_pos: Vector2 = door_pos + door_direction * (tile_size.x * 2)
+
 		var farm_pos := Vector2.ZERO
 		if i < farm_plots.size():
 			farm_pos = map_to_local(farm_plots[i].center)
 
 		add_child(npc_instance)
 		npc_instance.initialize(home_pos, farm_pos)
+
+		# Map NPC to their farm plot and connect signal
+		if i < farm_plots.size():
+			npc_farm_map[npc_instance] = farm_plots[i]
+			npc_instance.arrived_at_farm.connect(_on_npc_arrived_at_farm.bind(npc_instance))
+
+# ---------- wheat tile painting ----------
+
+func _on_npc_arrived_at_farm(npc: Node) -> void:
+	if not npc_farm_map.has(npc):
+		return
+	var farm_plot: Plot = npc_farm_map[npc]
+	_paint_wheat_on_farm(farm_plot.rect)
+
+func _paint_wheat_on_farm(farm_rect: Rect2i) -> void:
+	# Paint wheat tiles on the farm - each tile shows the same wheat image
+	for y in range(farm_rect.position.y, farm_rect.position.y + farm_rect.size.y):
+		for x in range(farm_rect.position.x, farm_rect.position.x + farm_rect.size.x):
+			var cell := Vector2i(x, y)
+			# Use (0, 0) so each tile shows the same wheat image
+			set_cell(cell, wheat_source_id, Vector2i(0, 0))
