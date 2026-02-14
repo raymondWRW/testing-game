@@ -68,6 +68,8 @@ var occupied := {} # Dictionary used like a set: occupied[cell] = true
 
 # Track tree positions for navigation obstacles
 var tree_cells: Array[Vector2i] = []
+var decoration_tree_cells: Array[Vector2i] = []  # Trees near roads (decoration only)
+var logging_tree_cells: Array[Vector2i] = []     # Trees at edges (for woodcutters)
 
 # Track NPC to farm mapping (NPC instance -> farm Plot)
 var npc_farm_map: Dictionary = {}
@@ -139,6 +141,8 @@ func generate(town: TownData = null) -> void:
 	all_plots.clear()
 	road_cells.clear()
 	tree_cells.clear()
+	decoration_tree_cells.clear()
+	logging_tree_cells.clear()
 
 	# 1) Fill entire map with grass first (10% chance for detailed grass)
 	for y in range(height):
@@ -527,7 +531,7 @@ func _spawn_decoration_trees() -> void:
 
 		# Check if position is valid (on grass, not occupied)
 		if _is_valid_tree_position(tree_pos):
-			_place_tree(tree_pos)
+			_place_tree(tree_pos, true)  # true = decoration tree
 			trees_placed += 1
 
 func _spawn_logging_trees() -> void:
@@ -559,7 +563,7 @@ func _spawn_logging_trees() -> void:
 
 		# Check if position is valid
 		if _is_valid_tree_position(tree_pos):
-			_place_tree(tree_pos)
+			_place_tree(tree_pos, false)  # false = logging tree
 			trees_placed += 1
 
 func _is_valid_tree_position(pos: Vector2i) -> bool:
@@ -583,7 +587,7 @@ func _is_valid_tree_position(pos: Vector2i) -> bool:
 
 	return true
 
-func _place_tree(pos: Vector2i) -> void:
+func _place_tree(pos: Vector2i, is_decoration: bool = false) -> void:
 	# Randomly pick tree variant
 	var tree_tile: Vector2i
 	if rng.randf() > 0.5:
@@ -594,6 +598,12 @@ func _place_tree(pos: Vector2i) -> void:
 	set_cell(pos, source_id, tree_tile)
 	occupied[pos] = true
 	tree_cells.append(pos)
+
+	# Track tree type separately
+	if is_decoration:
+		decoration_tree_cells.append(pos)
+	else:
+		logging_tree_cells.append(pos)
 
 func _add_tree_collisions() -> void:
 	# Remove existing tree collisions (in case of regeneration)
@@ -818,6 +828,8 @@ func _spawn_npcs() -> void:
 		if child.is_in_group("npcs"):
 			child.queue_free()
 
+	npc_farm_map.clear()
+
 	# Collect house and farm plots separately
 	var house_plots: Array[Plot] = []
 	var farm_plots: Array[Plot] = []
@@ -827,7 +839,11 @@ func _spawn_npcs() -> void:
 		elif plot.type == "farm":
 			farm_plots.append(plot)
 
-	# Spawn one NPC per house, assign farms in order
+	# Track which logging trees have been assigned
+	var available_logging_trees := logging_tree_cells.duplicate()
+	var woodcutter_index := 0
+
+	# Spawn one NPC per house
 	var tile_size := tile_set.tile_size
 	for i in range(house_plots.size()):
 		var house_plot: Plot = house_plots[i]
@@ -841,17 +857,24 @@ func _spawn_npcs() -> void:
 		# Offset 2 tiles away from the door, outside the house
 		var home_pos: Vector2 = door_pos + door_direction * (tile_size.x * 2)
 
-		var farm_pos := Vector2.ZERO
-		if i < farm_plots.size():
-			farm_pos = map_to_local(farm_plots[i].center)
-
 		add_child(npc_instance)
-		npc_instance.initialize(home_pos, farm_pos)
 
-		# Map NPC to their farm plot and connect signal
+		# Assign job: farmer if farm available, otherwise woodcutter
 		if i < farm_plots.size():
+			# This NPC is a farmer
+			var farm_pos: Vector2 = map_to_local(farm_plots[i].center)
+			npc_instance.initialize_farmer(home_pos, farm_pos)
 			npc_farm_map[npc_instance] = farm_plots[i]
 			npc_instance.arrived_at_farm.connect(_on_npc_arrived_at_farm.bind(npc_instance))
+		else:
+			# This NPC is a woodcutter
+			var tree_pos := Vector2.ZERO
+			if available_logging_trees.size() > 0:
+				# Assign a logging tree to this woodcutter
+				var tree_cell: Vector2i = available_logging_trees[woodcutter_index % available_logging_trees.size()]
+				tree_pos = map_to_local(tree_cell)
+				woodcutter_index += 1
+			npc_instance.initialize_woodcutter(home_pos, tree_pos)
 
 # ---------- wheat tile painting ----------
 
