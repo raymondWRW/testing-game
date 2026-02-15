@@ -40,8 +40,8 @@ extends TileMapLayer
 var road_cells := {}
 
 # Tree tiles (from tilemap_packed.png)
-@export var tree_tile_1: Vector2i = Vector2i(0, 5)  # First tree variant
-@export var tree_tile_2: Vector2i = Vector2i(1, 5)  # Second tree variant
+@export var tree_tile_1: Vector2i = Vector2i(5, 0)  # First tree variant
+@export var tree_tile_2: Vector2i = Vector2i(5, 1)  # Second tree variant
 
 # Tree settings
 @export var num_decoration_trees := 20  # Trees near roads for decoration
@@ -51,6 +51,7 @@ var road_cells := {}
 # Plot sizes (W x H in tiles)
 const HOUSE_SIZE := Vector2i(8, 12)
 const FARM_SIZE  := Vector2i(12, 21)
+const MARKET_SIZE := Vector2i(6, 8)  # Smaller than house
 
 @export var num_houses := 6
 @export var num_farms := 4
@@ -59,6 +60,7 @@ const FARM_SIZE  := Vector2i(12, 21)
 
 var house_scene := preload("res://scenes/house.tscn")
 var npc_scene := preload("res://scenes/npc.tscn")
+var market_scene := preload("res://scenes/market.tscn")
 
 var rng := RandomNumberGenerator.new()
 var all_plots: Array[Plot] = []  # Store all plots for intersection checking
@@ -73,6 +75,11 @@ var logging_tree_cells: Array[Vector2i] = []     # Trees at edges (for woodcutte
 
 # Track NPC to farm mapping (NPC instance -> farm Plot)
 var npc_farm_map: Dictionary = {}
+
+# Market data
+var market_plot: Plot = null
+var market_position: Vector2 = Vector2.ZERO
+var market_wheat_stock: int = 0  # Wheat available for purchase
 
 class Plot:
 	var rect: Rect2i
@@ -164,6 +171,9 @@ func generate(town: TownData = null) -> void:
 	# 4) Place houses near center (avoiding roads)
 	_place_houses_in_center_zone(plots)
 
+	# 5) Place market near center (avoiding houses and roads)
+	_place_market(plots)
+
 	# Store plots for later reference
 	all_plots.assign(plots)
 
@@ -171,15 +181,15 @@ func generate(town: TownData = null) -> void:
 	for p in plots:
 		_fill_rect(p.rect, dirt_center, true)
 
-	# 5) Connect houses to main roads (avoiding other buildings)
+	# 6) Connect houses and market to main roads (avoiding other buildings)
 	for plot in all_plots:
-		if plot.type == "house":
+		if plot.type == "house" or plot.type == "market":
 			_connect_to_main_road(plot)
 
-	# 6) Smooth road edges and corners
+	# 7) Smooth road edges and corners
 	_smooth_roads()
 
-	# 7) Spawn trees (decoration near roads, logging at edges)
+	# 8) Spawn trees (decoration near roads, logging at edges)
 	_spawn_decoration_trees()
 	_spawn_logging_trees()
 
@@ -189,12 +199,14 @@ func generate(town: TownData = null) -> void:
 		var center_cell := Vector2i(width / 2, height / 2)
 		player.global_position = to_global(map_to_local(center_cell))
 
-	# Add collision to house walls and trees
+	# Add collision to house walls, market, and trees
 	_add_house_collisions()
+	_add_market_collision()
 	_add_tree_collisions()
 
-	# Spawn house visuals
+	# Spawn house and market visuals
 	_spawn_houses()
+	_spawn_market()
 
 	# Set up navigation mesh for pathfinding (includes trees as obstacles)
 	_setup_navigation()
@@ -302,6 +314,43 @@ func _place_houses_in_center_zone(plots: Array) -> void:
 			plots.append(Plot.new(rect, "house", Vector2i(width / 2, height / 2)))
 			_mark_rect(rect, plot_margin)
 			houses_placed += 1
+
+func _place_market(plots: Array) -> void:
+	# Place market near center of map (close to road intersection)
+	var center_x := width / 2
+	var center_y := height / 2
+
+	# Try positions near center, spiraling outward
+	var attempts := 0
+	var search_radius := 5
+
+	while attempts < 1000:
+		attempts += 1
+
+		# Try random position near center
+		var x := center_x + rng.randi_range(-search_radius, search_radius) - MARKET_SIZE.x / 2
+		var y := center_y + rng.randi_range(-search_radius, search_radius) - MARKET_SIZE.y / 2
+
+		# Clamp to valid range
+		x = clamp(x, 0, width - MARKET_SIZE.x)
+		y = clamp(y, 0, height - MARKET_SIZE.y)
+
+		var rect := Rect2i(Vector2i(x, y), MARKET_SIZE)
+
+		if _rect_free(rect, plot_margin):
+			market_plot = Plot.new(rect, "market", Vector2i(width / 2, height / 2))
+			plots.append(market_plot)
+			_mark_rect(rect, plot_margin)
+			market_position = map_to_local(market_plot.center)
+			market_wheat_stock = 0
+			print("Market placed at: ", market_plot.center)
+			return
+
+		# Expand search radius every 100 attempts
+		if attempts % 100 == 0:
+			search_radius += 5
+
+	print("Warning: Could not place market!")
 
 func _carve_connecting_road(from: Vector2i, to: Vector2i, source_plot: Plot) -> void:
 	# Ensure coordinates are within bounds
@@ -714,6 +763,30 @@ func _add_wall_with_gap(body: StaticBody2D, wall_start: Vector2, wall_size: Vect
 		if bottom_height > 0:
 			_add_wall_segment(body, Vector2(wall_start.x, bottom_start + bottom_height / 2), Vector2(wall_size.x, bottom_height))
 
+func _add_market_collision() -> void:
+	# Remove existing market collision (in case of regeneration)
+	for child in get_children():
+		if child.is_in_group("market_collision"):
+			child.queue_free()
+
+	if market_plot == null:
+		return
+
+	var tile_size := tile_set.tile_size
+	var body := StaticBody2D.new()
+	body.add_to_group("market_collision")
+
+	var rect: Rect2i = market_plot.rect
+	var top_left := map_to_local(rect.position) - Vector2(tile_size) / 2
+	var size := Vector2(rect.size) * Vector2(tile_size)
+
+	# Market is open (no walls), but add a small collision around the stall
+	# Just mark the center area as collision-free for NPCs to enter
+	# Actually, let's make market accessible - no collision walls
+
+	body.position = top_left
+	add_child(body)
+
 # ---------- house spawning ----------
 
 func _spawn_houses() -> void:
@@ -734,6 +807,22 @@ func _spawn_houses() -> void:
 		var plot_center := plot.rect.position + plot.rect.size / 2
 		house_instance.position = map_to_local(plot_center)
 		add_child(house_instance)
+
+func _spawn_market() -> void:
+	# Remove existing market (in case of regeneration)
+	for child in get_children():
+		if child.is_in_group("market"):
+			child.queue_free()
+
+	if market_plot == null:
+		return
+
+	var market_instance = market_scene.instantiate()
+	market_instance.add_to_group("market")
+	# Position market at the center of the plot
+	var plot_center := market_plot.rect.position + market_plot.rect.size / 2
+	market_instance.position = map_to_local(plot_center)
+	add_child(market_instance)
 
 # ---------- navigation setup ----------
 
@@ -816,10 +905,6 @@ func _setup_navigation() -> void:
 	print("  - Houses blocked: ", house_rects.size())
 	print("  - Trees blocked: ", tree_cells.size())
 
-	# Force navigation map update
-	await get_tree().physics_frame
-	print("  - Navigation map ready")
-
 # ---------- NPC spawning ----------
 
 func _spawn_npcs() -> void:
@@ -876,6 +961,12 @@ func _spawn_npcs() -> void:
 				woodcutter_index += 1
 			npc_instance.initialize_woodcutter(home_pos, tree_pos)
 
+		# Give all NPCs access to market
+		if market_position != Vector2.ZERO:
+			npc_instance.set_market_position(market_position)
+			npc_instance.wants_to_sell.connect(_on_npc_wants_to_sell)
+			npc_instance.wants_to_buy.connect(_on_npc_wants_to_buy)
+
 # ---------- wheat tile painting ----------
 
 func _on_npc_arrived_at_farm(npc: Node) -> void:
@@ -891,3 +982,30 @@ func _paint_wheat_on_farm(farm_rect: Rect2i) -> void:
 			var cell := Vector2i(x, y)
 			# Use (0, 0) so each tile shows the same wheat image
 			set_cell(cell, wheat_source_id, Vector2i(0, 0))
+
+# ---------- market trading ----------
+
+func _on_npc_wants_to_sell(npc: Node, wheat_amount: int) -> void:
+	# Farmer is selling wheat to the market
+	market_wheat_stock += wheat_amount
+	_update_market_display()
+	print("Market: Farmer sold %d wheat. Stock: %d" % [wheat_amount, market_wheat_stock])
+
+func _on_npc_wants_to_buy(npc: Node, wood_amount: int) -> void:
+	# Woodcutter wants to buy wheat with wood (1:1 trade)
+	var wheat_to_give: int = mini(wood_amount, market_wheat_stock)
+	if wheat_to_give > 0:
+		market_wheat_stock -= wheat_to_give
+		npc.receive_wheat(wheat_to_give)
+		npc.spend_wood(wheat_to_give)
+		_update_market_display()
+		print("Market: Woodcutter bought %d wheat for %d wood. Stock: %d" % [wheat_to_give, wheat_to_give, market_wheat_stock])
+	else:
+		print("Market: No wheat available for woodcutter!")
+
+func _update_market_display() -> void:
+	# Update the market's stock display
+	for child in get_children():
+		if child.is_in_group("market") and child.has_method("update_stock_display"):
+			child.update_stock_display(market_wheat_stock)
+			break
