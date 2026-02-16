@@ -121,7 +121,7 @@ func _process_idle_home(delta: float) -> void:
 			_go_to_market()
 		elif has_work:
 			_state = State.WALKING_TO_WORK
-			nav_agent.target_position = work_position
+			nav_agent.target_position = to_global(work_position)
 			_stuck_timer = 0.0
 			_last_position = position
 
@@ -141,7 +141,7 @@ func _should_go_to_market() -> bool:
 
 func _go_to_market() -> void:
 	_state = State.WALKING_TO_MARKET
-	nav_agent.target_position = market_position
+	nav_agent.target_position = to_global(market_position)
 	_stuck_timer = 0.0
 	_last_position = position
 
@@ -236,7 +236,7 @@ func spend_wood(amount: int) -> void:
 
 func _go_home() -> void:
 	_state = State.WALKING_HOME
-	nav_agent.target_position = home_position
+	nav_agent.target_position = to_global(home_position)
 	_stuck_timer = 0.0
 	_last_position = position
 
@@ -284,7 +284,7 @@ func _check_stuck(delta: float) -> void:
 		_last_position = position
 
 func _handle_stuck() -> void:
-	var to_target := (nav_agent.target_position - position).normalized()
+	var to_target := (to_local(nav_agent.target_position) - position).normalized()
 	var perpendicular := Vector2(-to_target.y, to_target.x)
 	if randf() > 0.5:
 		perpendicular = -perpendicular
@@ -292,7 +292,7 @@ func _handle_stuck() -> void:
 	move_and_slide()
 
 func _move_toward_next_path_point() -> void:
-	var next_pos := nav_agent.get_next_path_position()
+	var next_pos := to_local(nav_agent.get_next_path_position())
 	var direction := (next_pos - position).normalized()
 
 	# Debug navigation issues
