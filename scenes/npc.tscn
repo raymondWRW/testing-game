@@ -29,11 +29,11 @@ shape = SubResource("CircleShape2D_npc")
 
 [node name="NavigationAgent2D" type="NavigationAgent2D" parent="."]
 path_desired_distance = 4.0
-target_desired_distance = 8.0
-path_max_distance = 100.0
-avoidance_enabled = true
-radius = 16.0
-neighbor_distance = 50.0
+target_desired_distance = 12.0
+path_max_distance = 1000.0
+avoidance_enabled = false
+radius = 8.0
+neighbor_distance = 100.0
 max_neighbors = 10
 max_speed = 80.0
 debug_enabled = true

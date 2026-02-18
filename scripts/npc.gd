@@ -51,22 +51,41 @@ func _ready() -> void:
 	# Initialize inventory
 	inventory = { "wheat": 0, "wood": 0 }
 
-	# Wait for navigation map to be ready
-	await get_tree().physics_frame
-	await get_tree().physics_frame
-	_nav_ready = true
-	_last_position = position
+	# Configure NavigationAgent2D for proper pathfinding
+	nav_agent.path_desired_distance = 4.0
+	nav_agent.target_desired_distance = 12.0
+	nav_agent.radius = 8.0  # Small radius to fit through gaps
+	nav_agent.neighbor_distance = 100.0
+	nav_agent.max_neighbors = 10
+	nav_agent.max_speed = speed
+	nav_agent.path_max_distance = 1000.0  # Large enough to find paths across the map
+	nav_agent.debug_enabled = true  # Ensure debug path lines are visible
+	nav_agent.avoidance_enabled = false  # Disable avoidance to prevent wall hugging
 
+	# Wait for navigation map to be fully ready
+	call_deferred("_init_navigation")
+
+func _init_navigation() -> void:
+	# Wait for navigation to be ready
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+
+	_nav_ready = true
+	_last_position = global_position
+	print("NPC [%s] ready at position: %s, home: %s, work: %s" % [job_name, global_position, home_position, work_position])
 	_update_inventory_display()
 
 func initialize_farmer(home_pos: Vector2, farm_pos: Vector2) -> void:
 	job = Job.FARMER
 	job_name = "Farmer"
 	home_position = home_pos
-	position = home_pos
+	global_position = home_pos
 	if farm_pos != Vector2.ZERO:
 		work_position = farm_pos
 		has_work = true
+		print("Farmer initialized - Home: %s, Farm: %s" % [home_pos, farm_pos])
+	else:
+		print("Warning: Farmer has no farm assigned!")
 	_state = State.IDLE_HOME
 	_idle_timer = randf_range(IDLE_HOME_MIN, IDLE_HOME_MAX)
 
@@ -74,10 +93,13 @@ func initialize_woodcutter(home_pos: Vector2, tree_pos: Vector2) -> void:
 	job = Job.WOODCUTTER
 	job_name = "Woodcutter"
 	home_position = home_pos
-	position = home_pos
+	global_position = home_pos
 	if tree_pos != Vector2.ZERO:
 		work_position = tree_pos
 		has_work = true
+		print("Woodcutter initialized - Home: %s, Tree: %s" % [home_pos, tree_pos])
+	else:
+		print("Warning: Woodcutter has no tree assigned!")
 	_state = State.IDLE_HOME
 	_idle_timer = randf_range(IDLE_HOME_MIN, IDLE_HOME_MAX)
 
@@ -94,8 +116,14 @@ func _physics_process(delta: float) -> void:
 		return
 
 	# Debug: print state every few seconds
-	if Engine.get_physics_frames() % 180 == 0:
-		print("NPC [%s] state: %s, has_work: %s, timer: %.1f" % [job_name, State.keys()[_state], has_work, _idle_timer])
+	if Engine.get_physics_frames() % 300 == 0:  # Less frequent but more detailed
+		print("NPC [%s] state: %s, pos: %s, has_work: %s, timer: %.1f" % [
+			job_name, 
+			State.keys()[_state], 
+			global_position,
+			has_work, 
+			_idle_timer
+		])
 
 	match _state:
 		State.IDLE_HOME:
@@ -121,9 +149,9 @@ func _process_idle_home(delta: float) -> void:
 			_go_to_market()
 		elif has_work:
 			_state = State.WALKING_TO_WORK
-			nav_agent.target_position = to_global(work_position)
+			nav_agent.target_position = work_position
 			_stuck_timer = 0.0
-			_last_position = position
+			_last_position = global_position
 
 func _should_go_to_market() -> bool:
 	if not has_market:
@@ -141,15 +169,16 @@ func _should_go_to_market() -> bool:
 
 func _go_to_market() -> void:
 	_state = State.WALKING_TO_MARKET
-	nav_agent.target_position = to_global(market_position)
+	nav_agent.target_position = market_position
 	_stuck_timer = 0.0
-	_last_position = position
+	_last_position = global_position
 
 func _process_walking_to_work(delta: float) -> void:
-	if nav_agent.is_navigation_finished() or position.distance_to(work_position) < 16.0:
+	if nav_agent.is_navigation_finished() or global_position.distance_to(work_position) < nav_agent.target_desired_distance:
 		velocity = Vector2.ZERO
 		_state = State.WORKING
 		_work_timer = randf_range(WORK_TIME_MIN, WORK_TIME_MAX)
+		print("NPC [%s] arrived at work, starting work timer: %.1f" % [job_name, _work_timer])
 
 		# Emit signal for farmers (to paint wheat)
 		if job == Job.FARMER:
@@ -176,20 +205,22 @@ func _process_working(delta: float) -> void:
 			_work_timer = randf_range(WORK_TIME_MIN, WORK_TIME_MAX)
 
 func _process_walking_home(delta: float) -> void:
-	if nav_agent.is_navigation_finished() or position.distance_to(home_position) < 16.0:
+	if nav_agent.is_navigation_finished() or global_position.distance_to(home_position) < nav_agent.target_desired_distance:
 		velocity = Vector2.ZERO
 		_state = State.IDLE_HOME
 		_idle_timer = randf_range(IDLE_HOME_MIN, IDLE_HOME_MAX)
+		print("NPC [%s] arrived home, idle timer: %.1f" % [job_name, _idle_timer])
 		return
 
 	_check_stuck(delta)
 	_move_toward_next_path_point()
 
 func _process_walking_to_market(delta: float) -> void:
-	if nav_agent.is_navigation_finished() or position.distance_to(market_position) < 16.0:
+	if nav_agent.is_navigation_finished() or global_position.distance_to(market_position) < nav_agent.target_desired_distance:
 		velocity = Vector2.ZERO
 		_state = State.AT_MARKET
 		_work_timer = MARKET_TIME
+		print("NPC [%s] arrived at market" % [job_name])
 		return
 
 	_check_stuck(delta)
@@ -236,9 +267,10 @@ func spend_wood(amount: int) -> void:
 
 func _go_home() -> void:
 	_state = State.WALKING_HOME
-	nav_agent.target_position = to_global(home_position)
+	nav_agent.target_position = home_position
 	_stuck_timer = 0.0
-	_last_position = position
+	_last_position = global_position
+	print("NPC [%s] going home from %s to %s" % [job_name, global_position, home_position])
 
 func _collect_resource() -> void:
 	var item: String
@@ -277,31 +309,67 @@ func _update_inventory_display() -> void:
 func _check_stuck(delta: float) -> void:
 	_stuck_timer += delta
 	if _stuck_timer >= STUCK_THRESHOLD:
-		var distance_moved := position.distance_to(_last_position)
+		var distance_moved := global_position.distance_to(_last_position)
 		if distance_moved < STUCK_DISTANCE:
+			print("NPC [%s] appears stuck, trying to unstuck" % [job_name])
 			_handle_stuck()
 		_stuck_timer = 0.0
-		_last_position = position
+		_last_position = global_position
 
 func _handle_stuck() -> void:
-	var to_target := (to_local(nav_agent.target_position) - position).normalized()
-	var perpendicular := Vector2(-to_target.y, to_target.x)
-	if randf() > 0.5:
-		perpendicular = -perpendicular
-	velocity = perpendicular * speed
+	# Try moving perpendicular to current target direction
+	if nav_agent.target_position == Vector2.ZERO:
+		return
+
+	var to_target := (nav_agent.target_position - global_position).normalized()
+	if not to_target.is_finite():
+		return
+
+	# Try a random direction to escape
+	var escape_angle := randf() * TAU  # Random angle 0 to 2*PI
+	var escape_dir := Vector2(cos(escape_angle), sin(escape_angle))
+	velocity = escape_dir * speed
 	move_and_slide()
 
+	# Force recalculate path after escaping
+	var current_target = nav_agent.target_position
+	nav_agent.target_position = Vector2.ZERO
+	nav_agent.target_position = current_target
+
 func _move_toward_next_path_point() -> void:
-	var next_pos := to_local(nav_agent.get_next_path_position())
-	var direction := (next_pos - position).normalized()
+	# Ensure we have a valid target
+	if nav_agent.target_position == Vector2.ZERO:
+		print("Warning: NPC [%s] has no target position!" % [job_name])
+		return
+		
+	if nav_agent.is_navigation_finished():
+		velocity = Vector2.ZERO
+		return
 
-	# Debug navigation issues
-	if Engine.get_physics_frames() % 60 == 0:
-		print("Nav debug - pos: %s, next: %s, target: %s, finished: %s" % [position, next_pos, nav_agent.target_position, nav_agent.is_navigation_finished()])
+	var next_pos := nav_agent.get_next_path_position()
+	var direction := (next_pos - global_position).normalized()
 
+	# Debug navigation issues (less frequent)
+	if Engine.get_physics_frames() % 180 == 0:
+		print("Nav debug [%s] - pos: %s, next: %s, target: %s, finished: %s, distance: %.1f" % [
+			job_name,
+			global_position, 
+			next_pos, 
+			nav_agent.target_position, 
+			nav_agent.is_navigation_finished(),
+			global_position.distance_to(nav_agent.target_position)
+		])
+
+	# Check if direction is valid
 	if direction.is_finite() and direction.length_squared() > 0.01:
 		velocity = direction * speed
 	else:
-		velocity = Vector2.ZERO
+		# Try direct movement if pathfinding fails
+		var direct_direction := (nav_agent.target_position - global_position).normalized()
+		if direct_direction.is_finite() and direct_direction.length_squared() > 0.01:
+			velocity = direct_direction * speed * 0.8  # Slightly slower for direct movement
+			print("NPC [%s] using direct movement" % [job_name])
+		else:
+			velocity = Vector2.ZERO
 
 	move_and_slide()

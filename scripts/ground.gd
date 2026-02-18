@@ -209,10 +209,8 @@ func generate(town: TownData = null) -> void:
 	_spawn_market()
 
 	# Set up navigation mesh for pathfinding (includes trees as obstacles)
+	# Note: _setup_navigation now handles spawning NPCs after navigation is ready
 	_setup_navigation()
-
-	# Spawn NPCs
-	_spawn_npcs()
 
 # ---------- main road system ----------
 
@@ -841,54 +839,74 @@ func _setup_navigation() -> void:
 	# Set agent radius for buffer around obstacles (one tile width)
 	nav_poly.agent_radius = float(tile_size.x)
 
-	# Collect all house rectangles for obstacle avoidance
-	var house_rects: Array[Rect2] = []
-	for plot in all_plots:
-		if plot.type == "house":
-			var rect: Rect2i = plot.rect
-			var house_top_left := map_to_local(rect.position) - Vector2(tile_size) / 2
-			var house_size := Vector2(rect.size) * Vector2(tile_size)
-			# Add padding of one tile around houses so NPCs stay away
-			var padding := float(tile_size.x)
-			house_rects.append(Rect2(
-				house_top_left - Vector2(padding, padding),
-				house_size + Vector2(padding * 2, padding * 2)
-			))
-
 	# Create navigation polygons for each row, avoiding houses
 	var map_top_left := map_to_local(Vector2i(0, 0)) - Vector2(tile_size) / 2
 	var map_bottom_right := map_to_local(Vector2i(width, height)) + Vector2(tile_size) / 2
 
+	# Collect all house and building rectangles for obstacle avoidance
+	# Use 2 tile padding to avoid overlapping when buildings are close
+	var building_rects: Array[Rect2] = []
+	var padding := float(tile_size.x) * 2.0
+	for plot in all_plots:
+		if plot.type == "house" or plot.type == "market":
+			var rect: Rect2i = plot.rect
+			var building_top_left := map_to_local(rect.position) - Vector2(tile_size) / 2
+			var building_size := Vector2(rect.size) * Vector2(tile_size)
+			var padded_rect := Rect2(
+				building_top_left - Vector2(padding, padding),
+				building_size + Vector2(padding * 2, padding * 2)
+			)
+			# Clamp to map bounds to avoid extending outside
+			padded_rect.position.x = max(padded_rect.position.x, map_top_left.x + 1)
+			padded_rect.position.y = max(padded_rect.position.y, map_top_left.y + 1)
+			var end_x = min(padded_rect.position.x + padded_rect.size.x, map_bottom_right.x - 1)
+			var end_y = min(padded_rect.position.y + padded_rect.size.y, map_bottom_right.y - 1)
+			padded_rect.size.x = end_x - padded_rect.position.x
+			padded_rect.size.y = end_y - padded_rect.position.y
+			if padded_rect.size.x > 0 and padded_rect.size.y > 0:
+				building_rects.append(padded_rect)
+
 	# Simple approach: create one big polygon with the map bounds
+	# Use counter-clockwise winding (TL -> TR -> BR -> BL)
 	var map_outline := PackedVector2Array()
-	map_outline.append(map_top_left)
-	map_outline.append(Vector2(map_top_left.x, map_bottom_right.y))
-	map_outline.append(map_bottom_right)
-	map_outline.append(Vector2(map_bottom_right.x, map_top_left.y))
+	map_outline.append(map_top_left)  # top-left
+	map_outline.append(Vector2(map_bottom_right.x, map_top_left.y))  # top-right
+	map_outline.append(map_bottom_right)  # bottom-right
+	map_outline.append(Vector2(map_top_left.x, map_bottom_right.y))  # bottom-left
 	nav_poly.add_outline(map_outline)
 
-	# Add house outlines as holes (opposite winding)
-	for house_rect in house_rects:
+	# Add building outlines as holes (SAME winding order as outer boundary)
+	for building_rect in building_rects:
 		var hole := PackedVector2Array()
-		# Clockwise for holes
-		hole.append(house_rect.position)
-		hole.append(Vector2(house_rect.position.x + house_rect.size.x, house_rect.position.y))
-		hole.append(house_rect.position + house_rect.size)
-		hole.append(Vector2(house_rect.position.x, house_rect.position.y + house_rect.size.y))
+		# Same winding as outer: TL -> TR -> BR -> BL
+		hole.append(building_rect.position)  # top-left
+		hole.append(Vector2(building_rect.position.x + building_rect.size.x, building_rect.position.y))  # top-right
+		hole.append(building_rect.position + building_rect.size)  # bottom-right
+		hole.append(Vector2(building_rect.position.x, building_rect.position.y + building_rect.size.y))  # bottom-left
 		nav_poly.add_outline(hole)
 
-	# Add tree outlines as holes (small squares with padding)
-	var tree_padding := float(tile_size.x)  # One tile buffer around trees
+	# Add tree outlines as holes (same winding order)
+	var tree_padding := float(tile_size.x) * 1.0  # 1 tile buffer around trees
 	for tree_pos in tree_cells:
 		var tree_center := map_to_local(tree_pos)
 		var half_size := tree_padding
-		var tree_hole := PackedVector2Array()
-		# Clockwise for holes
-		tree_hole.append(tree_center + Vector2(-half_size, -half_size))
-		tree_hole.append(tree_center + Vector2(half_size, -half_size))
-		tree_hole.append(tree_center + Vector2(half_size, half_size))
-		tree_hole.append(tree_center + Vector2(-half_size, half_size))
-		nav_poly.add_outline(tree_hole)
+		# Clamp to map bounds
+		var tl := Vector2(
+			max(tree_center.x - half_size, map_top_left.x + 1),
+			max(tree_center.y - half_size, map_top_left.y + 1)
+		)
+		var br := Vector2(
+			min(tree_center.x + half_size, map_bottom_right.x - 1),
+			min(tree_center.y + half_size, map_bottom_right.y - 1)
+		)
+		if br.x > tl.x and br.y > tl.y:
+			var tree_hole := PackedVector2Array()
+			# Same winding as outer: TL -> TR -> BR -> BL
+			tree_hole.append(tl)  # top-left
+			tree_hole.append(Vector2(br.x, tl.y))  # top-right
+			tree_hole.append(br)  # bottom-right
+			tree_hole.append(Vector2(tl.x, br.y))  # bottom-left
+			nav_poly.add_outline(tree_hole)
 
 	# Bake the navigation mesh
 	nav_poly.make_polygons_from_outlines()
@@ -898,12 +916,24 @@ func _setup_navigation() -> void:
 	nav_region.enabled = true
 	add_child(nav_region)
 
+	# Force navigation server to update
+	NavigationServer2D.map_force_update(get_world_2d().navigation_map)
+
 	# Debug: print navigation info
 	print("Navigation setup complete.")
 	print("  - Outlines: ", nav_poly.get_outline_count())
 	print("  - Polygons: ", nav_poly.get_polygon_count())
-	print("  - Houses blocked: ", house_rects.size())
+	print("  - Buildings blocked: ", building_rects.size())
 	print("  - Trees blocked: ", tree_cells.size())
+	if nav_poly.get_polygon_count() == 0:
+		print("WARNING: Navigation mesh has no polygons! Pathfinding will fail.")
+
+	# Wait for navigation to be fully processed before spawning NPCs
+	await get_tree().process_frame
+	await get_tree().physics_frame
+	
+	# Now spawn NPCs with proper delay
+	call_deferred("_spawn_npcs")
 
 # ---------- NPC spawning ----------
 
@@ -915,6 +945,9 @@ func _spawn_npcs() -> void:
 
 	npc_farm_map.clear()
 
+	# Wait one more frame to ensure everything is ready
+	await get_tree().process_frame
+
 	# Collect house and farm plots separately
 	var house_plots: Array[Plot] = []
 	var farm_plots: Array[Plot] = []
@@ -923,6 +956,8 @@ func _spawn_npcs() -> void:
 			house_plots.append(plot)
 		elif plot.type == "farm":
 			farm_plots.append(plot)
+
+	print("Spawning NPCs: %d houses, %d farms available" % [house_plots.size(), farm_plots.size()])
 
 	# Track which logging trees have been assigned
 	var available_logging_trees := logging_tree_cells.duplicate()
@@ -942,30 +977,41 @@ func _spawn_npcs() -> void:
 		# Offset 2 tiles away from the door, outside the house
 		var home_pos: Vector2 = door_pos + door_direction * (tile_size.x * 2)
 
+		# Add to scene first
 		add_child(npc_instance)
+
+		# Convert all positions to global before passing to NPC
+		var global_home_pos: Vector2 = to_global(home_pos)
+		var global_market_pos: Vector2 = to_global(market_position) if market_position != Vector2.ZERO else Vector2.ZERO
+
+		# Give all NPCs access to market first
+		if market_position != Vector2.ZERO:
+			npc_instance.set_market_position(global_market_pos)
+			npc_instance.wants_to_sell.connect(_on_npc_wants_to_sell)
+			npc_instance.wants_to_buy.connect(_on_npc_wants_to_buy)
 
 		# Assign job: farmer if farm available, otherwise woodcutter
 		if i < farm_plots.size():
 			# This NPC is a farmer
 			var farm_pos: Vector2 = map_to_local(farm_plots[i].center)
-			npc_instance.initialize_farmer(home_pos, farm_pos)
+			var global_farm_pos: Vector2 = to_global(farm_pos)
+			npc_instance.initialize_farmer(global_home_pos, global_farm_pos)
 			npc_farm_map[npc_instance] = farm_plots[i]
 			npc_instance.arrived_at_farm.connect(_on_npc_arrived_at_farm.bind(npc_instance))
+			print("Spawned farmer %d at home: %s, farm: %s" % [i, global_home_pos, global_farm_pos])
 		else:
 			# This NPC is a woodcutter
-			var tree_pos := Vector2.ZERO
+			var global_tree_pos := Vector2.ZERO
 			if available_logging_trees.size() > 0:
 				# Assign a logging tree to this woodcutter
 				var tree_cell: Vector2i = available_logging_trees[woodcutter_index % available_logging_trees.size()]
-				tree_pos = map_to_local(tree_cell)
+				var tree_pos: Vector2 = map_to_local(tree_cell)
+				global_tree_pos = to_global(tree_pos)
 				woodcutter_index += 1
-			npc_instance.initialize_woodcutter(home_pos, tree_pos)
+			npc_instance.initialize_woodcutter(global_home_pos, global_tree_pos)
+			print("Spawned woodcutter %d at home: %s, tree: %s" % [i - farm_plots.size(), global_home_pos, global_tree_pos])
 
-		# Give all NPCs access to market
-		if market_position != Vector2.ZERO:
-			npc_instance.set_market_position(market_position)
-			npc_instance.wants_to_sell.connect(_on_npc_wants_to_sell)
-			npc_instance.wants_to_buy.connect(_on_npc_wants_to_buy)
+	print("NPC spawning complete: %d NPCs created" % [house_plots.size()])
 
 # ---------- wheat tile painting ----------
 
