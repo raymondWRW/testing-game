@@ -10,8 +10,12 @@ signal wants_to_buy(npc: Node, wood_amount: int)
 
 @export var speed := 80.0
 
-@onready var nav_agent: NavigationAgent2D = $NavigationAgent2D
 @onready var inventory_label: Label = $InventoryLabel
+
+# Grid-based pathfinding
+var _ground_node: Node = null
+var _current_path: PackedVector2Array = []
+var _path_index: int = 0
 
 # Job assignment
 var job: Job = Job.FARMER
@@ -51,22 +55,14 @@ func _ready() -> void:
 	# Initialize inventory
 	inventory = { "wheat": 0, "wood": 0 }
 
-	# Configure NavigationAgent2D for proper pathfinding
-	nav_agent.path_desired_distance = 4.0
-	nav_agent.target_desired_distance = 12.0
-	nav_agent.radius = 8.0  # Small radius to fit through gaps
-	nav_agent.neighbor_distance = 100.0
-	nav_agent.max_neighbors = 10
-	nav_agent.max_speed = speed
-	nav_agent.path_max_distance = 1000.0  # Large enough to find paths across the map
-	nav_agent.debug_enabled = true  # Ensure debug path lines are visible
-	nav_agent.avoidance_enabled = false  # Disable avoidance to prevent wall hugging
+	# Get reference to ground node for pathfinding
+	_ground_node = get_parent()
 
-	# Wait for navigation map to be fully ready
+	# Wait for grid to be ready
 	call_deferred("_init_navigation")
 
 func _init_navigation() -> void:
-	# Wait for navigation to be ready
+	# Wait for ground's astar_grid to be ready
 	await get_tree().physics_frame
 	await get_tree().physics_frame
 
@@ -149,7 +145,7 @@ func _process_idle_home(delta: float) -> void:
 			_go_to_market()
 		elif has_work:
 			_state = State.WALKING_TO_WORK
-			nav_agent.target_position = work_position
+			_request_path(work_position)
 			_stuck_timer = 0.0
 			_last_position = global_position
 
@@ -169,12 +165,12 @@ func _should_go_to_market() -> bool:
 
 func _go_to_market() -> void:
 	_state = State.WALKING_TO_MARKET
-	nav_agent.target_position = market_position
+	_request_path(market_position)
 	_stuck_timer = 0.0
 	_last_position = global_position
 
 func _process_walking_to_work(delta: float) -> void:
-	if nav_agent.is_navigation_finished() or global_position.distance_to(work_position) < nav_agent.target_desired_distance:
+	if _is_path_finished() or global_position.distance_to(work_position) < 16.0:
 		velocity = Vector2.ZERO
 		_state = State.WORKING
 		_work_timer = randf_range(WORK_TIME_MIN, WORK_TIME_MAX)
@@ -205,7 +201,7 @@ func _process_working(delta: float) -> void:
 			_work_timer = randf_range(WORK_TIME_MIN, WORK_TIME_MAX)
 
 func _process_walking_home(delta: float) -> void:
-	if nav_agent.is_navigation_finished() or global_position.distance_to(home_position) < nav_agent.target_desired_distance:
+	if _is_path_finished() or global_position.distance_to(home_position) < 16.0:
 		velocity = Vector2.ZERO
 		_state = State.IDLE_HOME
 		_idle_timer = randf_range(IDLE_HOME_MIN, IDLE_HOME_MAX)
@@ -216,7 +212,7 @@ func _process_walking_home(delta: float) -> void:
 	_move_toward_next_path_point()
 
 func _process_walking_to_market(delta: float) -> void:
-	if nav_agent.is_navigation_finished() or global_position.distance_to(market_position) < nav_agent.target_desired_distance:
+	if _is_path_finished() or global_position.distance_to(market_position) < 16.0:
 		velocity = Vector2.ZERO
 		_state = State.AT_MARKET
 		_work_timer = MARKET_TIME
@@ -267,7 +263,7 @@ func spend_wood(amount: int) -> void:
 
 func _go_home() -> void:
 	_state = State.WALKING_HOME
-	nav_agent.target_position = home_position
+	_request_path(home_position)
 	_stuck_timer = 0.0
 	_last_position = global_position
 	print("NPC [%s] going home from %s to %s" % [job_name, global_position, home_position])
@@ -317,59 +313,66 @@ func _check_stuck(delta: float) -> void:
 		_last_position = global_position
 
 func _handle_stuck() -> void:
-	# Try moving perpendicular to current target direction
-	if nav_agent.target_position == Vector2.ZERO:
-		return
-
-	var to_target := (nav_agent.target_position - global_position).normalized()
-	if not to_target.is_finite():
-		return
-
 	# Try a random direction to escape
 	var escape_angle := randf() * TAU  # Random angle 0 to 2*PI
 	var escape_dir := Vector2(cos(escape_angle), sin(escape_angle))
 	velocity = escape_dir * speed
 	move_and_slide()
 
-	# Force recalculate path after escaping
-	var current_target = nav_agent.target_position
-	nav_agent.target_position = Vector2.ZERO
-	nav_agent.target_position = current_target
+	# Skip to next path point
+	if _path_index < _current_path.size() - 1:
+		_path_index += 1
+
+# Request a new path from current position to target
+func _request_path(target: Vector2) -> void:
+	_current_path.clear()
+	_path_index = 0
+
+	if _ground_node and _ground_node.has_method("get_grid_path"):
+		_current_path = _ground_node.get_grid_path(global_position, target)
+		if _current_path.size() > 0:
+			print("NPC [%s] got path with %d points" % [job_name, _current_path.size()])
+		else:
+			print("NPC [%s] failed to get path to %s" % [job_name, target])
+	else:
+		print("NPC [%s] no ground node for pathfinding!" % [job_name])
+
+func _is_path_finished() -> bool:
+	return _path_index >= _current_path.size()
 
 func _move_toward_next_path_point() -> void:
-	# Ensure we have a valid target
-	if nav_agent.target_position == Vector2.ZERO:
-		print("Warning: NPC [%s] has no target position!" % [job_name])
-		return
-		
-	if nav_agent.is_navigation_finished():
+	# Check if we have a valid path
+	if _current_path.size() == 0 or _path_index >= _current_path.size():
 		velocity = Vector2.ZERO
 		return
 
-	var next_pos := nav_agent.get_next_path_position()
+	var next_pos := _current_path[_path_index]
+	var distance := global_position.distance_to(next_pos)
+
+	# If we're close enough to current waypoint, move to next
+	if distance < 8.0:
+		_path_index += 1
+		if _path_index >= _current_path.size():
+			velocity = Vector2.ZERO
+			return
+		next_pos = _current_path[_path_index]
+
 	var direction := (next_pos - global_position).normalized()
 
-	# Debug navigation issues (less frequent)
+	# Debug navigation (less frequent)
 	if Engine.get_physics_frames() % 180 == 0:
-		print("Nav debug [%s] - pos: %s, next: %s, target: %s, finished: %s, distance: %.1f" % [
+		print("Path debug [%s] - pos: %s, next: %s, index: %d/%d" % [
 			job_name,
-			global_position, 
-			next_pos, 
-			nav_agent.target_position, 
-			nav_agent.is_navigation_finished(),
-			global_position.distance_to(nav_agent.target_position)
+			global_position,
+			next_pos,
+			_path_index,
+			_current_path.size()
 		])
 
-	# Check if direction is valid
+	# Move toward next waypoint
 	if direction.is_finite() and direction.length_squared() > 0.01:
 		velocity = direction * speed
 	else:
-		# Try direct movement if pathfinding fails
-		var direct_direction := (nav_agent.target_position - global_position).normalized()
-		if direct_direction.is_finite() and direct_direction.length_squared() > 0.01:
-			velocity = direct_direction * speed * 0.8  # Slightly slower for direct movement
-			print("NPC [%s] using direct movement" % [job_name])
-		else:
-			velocity = Vector2.ZERO
+		velocity = Vector2.ZERO
 
 	move_and_slide()

@@ -73,6 +73,9 @@ var tree_cells: Array[Vector2i] = []
 var decoration_tree_cells: Array[Vector2i] = []  # Trees near roads (decoration only)
 var logging_tree_cells: Array[Vector2i] = []     # Trees at edges (for woodcutters)
 
+# Grid-based pathfinding
+var astar_grid: AStarGrid2D
+
 # Track NPC to farm mapping (NPC instance -> farm Plot)
 var npc_farm_map: Dictionary = {}
 
@@ -825,115 +828,108 @@ func _spawn_market() -> void:
 # ---------- navigation setup ----------
 
 func _setup_navigation() -> void:
-	# Remove existing navigation region (in case of regeneration)
-	for child in get_children():
-		if child.is_in_group("nav_region"):
-			child.queue_free()
-
+	# Use grid-based A* pathfinding instead of NavigationPolygon
 	var tile_size := tile_set.tile_size
-	var nav_region := NavigationRegion2D.new()
-	nav_region.add_to_group("nav_region")
 
-	var nav_poly := NavigationPolygon.new()
+	# Create AStarGrid2D
+	astar_grid = AStarGrid2D.new()
+	astar_grid.region = Rect2i(0, 0, width, height)
+	astar_grid.cell_size = Vector2(tile_size)
+	astar_grid.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+	astar_grid.update()
 
-	# Set agent radius for buffer around obstacles (one tile width)
-	nav_poly.agent_radius = float(tile_size.x)
+	# Mark all cells as walkable initially (they already are by default)
 
-	# Create navigation polygons for each row, avoiding houses
-	var map_top_left := map_to_local(Vector2i(0, 0)) - Vector2(tile_size) / 2
-	var map_bottom_right := map_to_local(Vector2i(width, height)) + Vector2(tile_size) / 2
-
-	# Collect all house and building rectangles for obstacle avoidance
-	# Use 2 tile padding to avoid overlapping when buildings are close
-	var building_rects: Array[Rect2] = []
-	var padding := float(tile_size.x) * 2.0
+	# Block building cells (houses and market) with padding
+	var building_padding := 2  # 2 tile padding around buildings
 	for plot in all_plots:
 		if plot.type == "house" or plot.type == "market":
 			var rect: Rect2i = plot.rect
-			var building_top_left := map_to_local(rect.position) - Vector2(tile_size) / 2
-			var building_size := Vector2(rect.size) * Vector2(tile_size)
-			var padded_rect := Rect2(
-				building_top_left - Vector2(padding, padding),
-				building_size + Vector2(padding * 2, padding * 2)
-			)
-			# Clamp to map bounds to avoid extending outside
-			padded_rect.position.x = max(padded_rect.position.x, map_top_left.x + 1)
-			padded_rect.position.y = max(padded_rect.position.y, map_top_left.y + 1)
-			var end_x = min(padded_rect.position.x + padded_rect.size.x, map_bottom_right.x - 1)
-			var end_y = min(padded_rect.position.y + padded_rect.size.y, map_bottom_right.y - 1)
-			padded_rect.size.x = end_x - padded_rect.position.x
-			padded_rect.size.y = end_y - padded_rect.position.y
-			if padded_rect.size.x > 0 and padded_rect.size.y > 0:
-				building_rects.append(padded_rect)
+			# Expand rect by padding
+			var start_x := maxi(0, rect.position.x - building_padding)
+			var start_y := maxi(0, rect.position.y - building_padding)
+			var end_x := mini(width - 1, rect.position.x + rect.size.x + building_padding)
+			var end_y := mini(height - 1, rect.position.y + rect.size.y + building_padding)
 
-	# Simple approach: create one big polygon with the map bounds
-	# Use counter-clockwise winding (TL -> TR -> BR -> BL)
-	var map_outline := PackedVector2Array()
-	map_outline.append(map_top_left)  # top-left
-	map_outline.append(Vector2(map_bottom_right.x, map_top_left.y))  # top-right
-	map_outline.append(map_bottom_right)  # bottom-right
-	map_outline.append(Vector2(map_top_left.x, map_bottom_right.y))  # bottom-left
-	nav_poly.add_outline(map_outline)
+			for y in range(start_y, end_y + 1):
+				for x in range(start_x, end_x + 1):
+					astar_grid.set_point_solid(Vector2i(x, y), true)
 
-	# Add building outlines as holes (SAME winding order as outer boundary)
-	for building_rect in building_rects:
-		var hole := PackedVector2Array()
-		# Same winding as outer: TL -> TR -> BR -> BL
-		hole.append(building_rect.position)  # top-left
-		hole.append(Vector2(building_rect.position.x + building_rect.size.x, building_rect.position.y))  # top-right
-		hole.append(building_rect.position + building_rect.size)  # bottom-right
-		hole.append(Vector2(building_rect.position.x, building_rect.position.y + building_rect.size.y))  # bottom-left
-		nav_poly.add_outline(hole)
-
-	# Add tree outlines as holes (same winding order)
-	var tree_padding := float(tile_size.x) * 1.0  # 1 tile buffer around trees
+	# Block tree cells with padding
+	var tree_padding := 1  # 1 tile padding around trees
 	for tree_pos in tree_cells:
-		var tree_center := map_to_local(tree_pos)
-		var half_size := tree_padding
-		# Clamp to map bounds
-		var tl := Vector2(
-			max(tree_center.x - half_size, map_top_left.x + 1),
-			max(tree_center.y - half_size, map_top_left.y + 1)
-		)
-		var br := Vector2(
-			min(tree_center.x + half_size, map_bottom_right.x - 1),
-			min(tree_center.y + half_size, map_bottom_right.y - 1)
-		)
-		if br.x > tl.x and br.y > tl.y:
-			var tree_hole := PackedVector2Array()
-			# Same winding as outer: TL -> TR -> BR -> BL
-			tree_hole.append(tl)  # top-left
-			tree_hole.append(Vector2(br.x, tl.y))  # top-right
-			tree_hole.append(br)  # bottom-right
-			tree_hole.append(Vector2(tl.x, br.y))  # bottom-left
-			nav_poly.add_outline(tree_hole)
+		for dy in range(-tree_padding, tree_padding + 1):
+			for dx in range(-tree_padding, tree_padding + 1):
+				var cell := tree_pos + Vector2i(dx, dy)
+				if cell.x >= 0 and cell.x < width and cell.y >= 0 and cell.y < height:
+					astar_grid.set_point_solid(cell, true)
 
-	# Bake the navigation mesh
-	nav_poly.make_polygons_from_outlines()
-	nav_region.navigation_polygon = nav_poly
+	# Count blocked and walkable cells for debug
+	var blocked_count := 0
+	var walkable_count := 0
+	for y in range(height):
+		for x in range(width):
+			if astar_grid.is_point_solid(Vector2i(x, y)):
+				blocked_count += 1
+			else:
+				walkable_count += 1
 
-	# Make sure navigation region is enabled and visible
-	nav_region.enabled = true
-	add_child(nav_region)
+	print("Grid navigation setup complete.")
+	print("  - Grid size: %d x %d" % [width, height])
+	print("  - Walkable cells: %d" % walkable_count)
+	print("  - Blocked cells: %d" % blocked_count)
 
-	# Force navigation server to update
-	NavigationServer2D.map_force_update(get_world_2d().navigation_map)
-
-	# Debug: print navigation info
-	print("Navigation setup complete.")
-	print("  - Outlines: ", nav_poly.get_outline_count())
-	print("  - Polygons: ", nav_poly.get_polygon_count())
-	print("  - Buildings blocked: ", building_rects.size())
-	print("  - Trees blocked: ", tree_cells.size())
-	if nav_poly.get_polygon_count() == 0:
-		print("WARNING: Navigation mesh has no polygons! Pathfinding will fail.")
-
-	# Wait for navigation to be fully processed before spawning NPCs
+	# Wait for everything to be ready before spawning NPCs
 	await get_tree().process_frame
 	await get_tree().physics_frame
-	
-	# Now spawn NPCs with proper delay
+
+	# Now spawn NPCs
 	call_deferred("_spawn_npcs")
+
+# Get path from one position to another using grid-based A*
+func get_grid_path(from_pos: Vector2, to_pos: Vector2) -> PackedVector2Array:
+	var tile_size := tile_set.tile_size
+
+	# Convert world positions to grid cells
+	var from_cell := local_to_map(to_local(from_pos))
+	var to_cell := local_to_map(to_local(to_pos))
+
+	# Clamp to grid bounds
+	from_cell.x = clampi(from_cell.x, 0, width - 1)
+	from_cell.y = clampi(from_cell.y, 0, height - 1)
+	to_cell.x = clampi(to_cell.x, 0, width - 1)
+	to_cell.y = clampi(to_cell.y, 0, height - 1)
+
+	# If start or end is blocked, find nearest walkable cell
+	if astar_grid.is_point_solid(from_cell):
+		from_cell = _find_nearest_walkable(from_cell)
+	if astar_grid.is_point_solid(to_cell):
+		to_cell = _find_nearest_walkable(to_cell)
+
+	# Get path in grid coordinates
+	var grid_path := astar_grid.get_point_path(from_cell, to_cell)
+
+	# Convert to world positions
+	var world_path := PackedVector2Array()
+	for cell in grid_path:
+		var local_pos := map_to_local(Vector2i(cell))
+		var global_pos := to_global(local_pos)
+		world_path.append(global_pos)
+
+	return world_path
+
+func _find_nearest_walkable(cell: Vector2i) -> Vector2i:
+	# Search in expanding squares around the cell
+	for radius in range(1, 10):
+		for dy in range(-radius, radius + 1):
+			for dx in range(-radius, radius + 1):
+				if abs(dx) != radius and abs(dy) != radius:
+					continue  # Only check perimeter
+				var check := cell + Vector2i(dx, dy)
+				if check.x >= 0 and check.x < width and check.y >= 0 and check.y < height:
+					if not astar_grid.is_point_solid(check):
+						return check
+	return cell  # Fallback to original
 
 # ---------- NPC spawning ----------
 
