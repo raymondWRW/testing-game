@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3 uid="uid://dapbuqr3t47cr"]
+[gd_scene load_steps=11 format=3 uid="uid://dapbuqr3t47cr"]
 
 [ext_resource type="PackedScene" uid="uid://bka5ow6j8cqgt" path="res://scenes/player.tscn" id="1_uwrxv"]
 [ext_resource type="Texture2D" uid="uid://dbb2bg7et52x2" path="res://assets/Tilemap/tilemap_packed.png" id="2_lnu2h"]
@@ -7,6 +7,7 @@
 [ext_resource type="Resource" path="res://resources/town_starter.tres" id="5_starter"]
 [ext_resource type="Resource" path="res://resources/town_market.tres" id="6_market"]
 [ext_resource type="Texture2D" path="res://assets/farm/wheat.jpg" id="7_wheat"]
+[ext_resource type="Script" path="res://scripts/simulation_ui.gd" id="8_simui"]
 
 [sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_yqjtg"]
 texture = ExtResource("2_lnu2h")
@@ -110,3 +111,6 @@ z_index = -10
 tile_set = SubResource("TileSet_lnu2h")
 script = ExtResource("3_lbhrr")
 auto_generate = false
+
+[node name="SimulationUI" type="CanvasLayer" parent="."]
+script = ExtResource("8_simui")

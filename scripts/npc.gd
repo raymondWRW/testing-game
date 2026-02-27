@@ -1,6 +1,6 @@
 extends CharacterBody2D
 
-enum Job { FARMER, WOODCUTTER }
+enum Job { FARMER, WOODCUTTER, NOBLE }
 enum State { IDLE_HOME, WALKING_TO_WORK, WORKING, WALKING_HOME, WALKING_TO_MARKET, AT_MARKET }
 
 signal arrived_at_farm
@@ -28,7 +28,13 @@ var market_position: Vector2 = Vector2.ZERO
 var has_work: bool = false
 var has_market: bool = false
 
-# Inventory system
+# Economic simulation resources (from npc_simulation.py)
+var food: float = 100.0
+var wood: float = 50.0
+var gold: float = 50.0
+var _alive: bool = true
+
+# Inventory system (for visual/local behavior)
 var inventory: Dictionary = {}  # { "wheat": 0, "wood": 0 }
 const MAX_CARRY := 10  # Max items before returning home
 const SELL_THRESHOLD := 5  # Sell wheat above this amount
@@ -58,8 +64,77 @@ func _ready() -> void:
 	# Get reference to ground node for pathfinding
 	_ground_node = get_parent()
 
+	# Register with economy simulation if it exists
+	var economy := _get_economy_simulation()
+	if economy:
+		economy.register_npc(self)
+
 	# Wait for grid to be ready
 	call_deferred("_init_navigation")
+
+func _get_economy_simulation() -> Node:
+	# Check if parent (ground) has economy simulation as sibling
+	var parent := get_parent()
+	if parent:
+		# Direct child of parent
+		for child in parent.get_children():
+			if child is EconomySimulation:
+				return child
+		# Also check if parent has it as a named node
+		if parent.has_node("EconomySimulation"):
+			return parent.get_node("EconomySimulation")
+
+	# Search the entire tree as fallback
+	return _find_economy_in_tree(get_tree().root)
+
+func _find_economy_in_tree(node: Node) -> Node:
+	if node is EconomySimulation:
+		return node
+	for child in node.get_children():
+		var found := _find_economy_in_tree(child)
+		if found:
+			return found
+	return null
+
+# Economic simulation methods (interface for EconomySimulation)
+func is_alive() -> bool:
+	return _alive
+
+func set_alive(value: bool) -> void:
+	_alive = value
+	if not _alive:
+		# Visual indication of death
+		modulate = Color(0.3, 0.3, 0.3, 0.5)
+		set_physics_process(false)
+
+func get_economic_role() -> int:
+	# Returns EconomySimulation.Role enum value
+	match job:
+		Job.FARMER: return 0  # Role.FARMER
+		Job.WOODCUTTER: return 1  # Role.LUMBERJACK
+		Job.NOBLE: return 2  # Role.NOBLE
+	return 0
+
+func get_monthly_food_need() -> int:
+	return 5
+
+func get_monthly_wood_need(season: int) -> int:
+	# Season: 0=Spring, 1=Summer, 2=Fall, 3=Winter
+	if season == 3:  # Winter
+		return 5
+	return 1
+
+func get_months_of_food() -> float:
+	var need := get_monthly_food_need()
+	if need == 0:
+		return INF
+	return food / need
+
+func get_months_of_wood(season: int) -> float:
+	var need := get_monthly_wood_need(season)
+	if need == 0:
+		return INF
+	return wood / need
 
 func _init_navigation() -> void:
 	# Wait for ground's astar_grid to be ready
@@ -99,6 +174,33 @@ func initialize_woodcutter(home_pos: Vector2, tree_pos: Vector2) -> void:
 	_state = State.IDLE_HOME
 	_idle_timer = randf_range(IDLE_HOME_MIN, IDLE_HOME_MAX)
 
+func initialize_noble(home_pos: Vector2) -> void:
+	job = Job.NOBLE
+	job_name = "Noble"
+	home_position = home_pos
+	global_position = home_pos
+	has_work = false  # Nobles don't work
+	# Nobles start with more gold
+	gold = 200.0
+	food = 150.0
+	wood = 100.0
+	print("Noble initialized - Home: %s" % home_pos)
+	_state = State.IDLE_HOME
+	_idle_timer = randf_range(IDLE_HOME_MIN, IDLE_HOME_MAX)
+
+func initialize_with_resources(role: int, home_pos: Vector2, init_food: float, init_wood: float, init_gold: float) -> void:
+	# Used for spawning new NPCs from replication
+	food = init_food
+	wood = init_wood
+	gold = init_gold
+	match role:
+		0:  # FARMER
+			initialize_farmer(home_pos, Vector2.ZERO)  # Will need work assigned later
+		1:  # LUMBERJACK
+			initialize_woodcutter(home_pos, Vector2.ZERO)  # Will need work assigned later
+		2:  # NOBLE
+			initialize_noble(home_pos)
+
 func set_market_position(pos: Vector2) -> void:
 	market_position = pos
 	has_market = pos != Vector2.ZERO
@@ -108,17 +210,17 @@ func set_work_position(pos: Vector2) -> void:
 	has_work = pos != Vector2.ZERO
 
 func _physics_process(delta: float) -> void:
-	if not _nav_ready:
+	if not _nav_ready or not _alive:
 		return
 
 	# Debug: print state every few seconds
 	if Engine.get_physics_frames() % 300 == 0:  # Less frequent but more detailed
-		print("NPC [%s] state: %s, pos: %s, has_work: %s, timer: %.1f" % [
-			job_name, 
-			State.keys()[_state], 
+		print("NPC [%s] state: %s, pos: %s, has_work: %s, F:%.0f W:%.0f G:%.0f" % [
+			job_name,
+			State.keys()[_state],
 			global_position,
-			has_work, 
-			_idle_timer
+			has_work,
+			food, wood, gold
 		])
 
 	match _state:
@@ -140,6 +242,18 @@ func _process_idle_home(delta: float) -> void:
 	_idle_timer -= delta
 
 	if _idle_timer <= 0.0:
+		# Update inventory display periodically
+		_update_inventory_display()
+
+		# Nobles mostly stay home (occasionally go to market)
+		if job == Job.NOBLE:
+			if _should_go_to_market():
+				_go_to_market()
+			else:
+				# Stay home longer
+				_idle_timer = randf_range(IDLE_HOME_MIN * 2, IDLE_HOME_MAX * 2)
+			return
+
 		# Decide what to do next
 		if _should_go_to_market():
 			_go_to_market()
@@ -293,12 +407,12 @@ func _update_inventory_display() -> void:
 		return
 
 	var display_text := "[%s]\n" % job_name
+	# Show economic resources
+	display_text += "F:%d W:%d G:%d\n" % [int(food), int(wood), int(gold)]
+	# Show carried items
 	for item in inventory.keys():
 		if inventory[item] > 0:
 			display_text += "%s: %d\n" % [item, inventory[item]]
-
-	if _get_total_items() == 0:
-		display_text += "(empty)"
 
 	inventory_label.text = display_text
 

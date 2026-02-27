@@ -55,8 +55,12 @@ const MARKET_SIZE := Vector2i(6, 8)  # Smaller than house
 
 @export var num_houses := 6
 @export var num_farms := 4
+@export var num_nobles := 2       # nobles who don't work
 @export var plot_margin := 2      # spacing between plots
 @export var road_width := 2       # thickness of roads in tiles
+
+# Economic simulation
+var economy_simulation: EconomySimulation = null
 
 var house_scene := preload("res://scenes/house.tscn")
 var npc_scene := preload("res://scenes/npc.tscn")
@@ -143,8 +147,14 @@ func generate(town: TownData = null) -> void:
 		num_farms = town.num_farms
 		plot_margin = town.plot_margin
 		road_width = town.road_width
+		# Get num_nobles from metadata if available
+		if town.metadata.has("num_nobles"):
+			num_nobles = town.metadata["num_nobles"]
 
 	rng.seed = world_seed
+
+	# Set up economy simulation
+	_setup_economy_simulation()
 
 	clear()
 	occupied.clear()
@@ -953,14 +963,25 @@ func _spawn_npcs() -> void:
 		elif plot.type == "farm":
 			farm_plots.append(plot)
 
-	print("Spawning NPCs: %d houses, %d farms available" % [house_plots.size(), farm_plots.size()])
+	print("Spawning NPCs: %d houses, %d farms available, %d nobles requested" % [house_plots.size(), farm_plots.size(), num_nobles])
 
 	# Track which logging trees have been assigned
 	var available_logging_trees := logging_tree_cells.duplicate()
 	var woodcutter_index := 0
 
+	# Calculate how many of each type to spawn
+	# Priority: farmers (one per farm), then nobles, then woodcutters
+	var num_farmers := mini(farm_plots.size(), house_plots.size())
+	var remaining_houses := house_plots.size() - num_farmers
+	var actual_nobles := mini(num_nobles, remaining_houses)
+	var num_woodcutters := remaining_houses - actual_nobles
+
 	# Spawn one NPC per house
 	var tile_size := tile_set.tile_size
+	var farmer_count := 0
+	var noble_count := 0
+	var woodcutter_count := 0
+
 	for i in range(house_plots.size()):
 		var house_plot: Plot = house_plots[i]
 		var npc_instance = npc_scene.instantiate()
@@ -986,28 +1007,34 @@ func _spawn_npcs() -> void:
 			npc_instance.wants_to_sell.connect(_on_npc_wants_to_sell)
 			npc_instance.wants_to_buy.connect(_on_npc_wants_to_buy)
 
-		# Assign job: farmer if farm available, otherwise woodcutter
-		if i < farm_plots.size():
+		# Assign job based on position in list
+		if farmer_count < num_farmers:
 			# This NPC is a farmer
-			var farm_pos: Vector2 = map_to_local(farm_plots[i].center)
+			var farm_pos: Vector2 = map_to_local(farm_plots[farmer_count].center)
 			var global_farm_pos: Vector2 = to_global(farm_pos)
 			npc_instance.initialize_farmer(global_home_pos, global_farm_pos)
-			npc_farm_map[npc_instance] = farm_plots[i]
+			npc_farm_map[npc_instance] = farm_plots[farmer_count]
 			npc_instance.arrived_at_farm.connect(_on_npc_arrived_at_farm.bind(npc_instance))
-			print("Spawned farmer %d at home: %s, farm: %s" % [i, global_home_pos, global_farm_pos])
+			print("Spawned farmer %d at home: %s, farm: %s" % [farmer_count, global_home_pos, global_farm_pos])
+			farmer_count += 1
+		elif noble_count < actual_nobles:
+			# This NPC is a noble
+			npc_instance.initialize_noble(global_home_pos)
+			print("Spawned noble %d at home: %s" % [noble_count, global_home_pos])
+			noble_count += 1
 		else:
 			# This NPC is a woodcutter
 			var global_tree_pos := Vector2.ZERO
 			if available_logging_trees.size() > 0:
 				# Assign a logging tree to this woodcutter
-				var tree_cell: Vector2i = available_logging_trees[woodcutter_index % available_logging_trees.size()]
+				var tree_cell: Vector2i = available_logging_trees[woodcutter_count % available_logging_trees.size()]
 				var tree_pos: Vector2 = map_to_local(tree_cell)
 				global_tree_pos = to_global(tree_pos)
-				woodcutter_index += 1
 			npc_instance.initialize_woodcutter(global_home_pos, global_tree_pos)
-			print("Spawned woodcutter %d at home: %s, tree: %s" % [i - farm_plots.size(), global_home_pos, global_tree_pos])
+			print("Spawned woodcutter %d at home: %s, tree: %s" % [woodcutter_count, global_home_pos, global_tree_pos])
+			woodcutter_count += 1
 
-	print("NPC spawning complete: %d NPCs created" % [house_plots.size()])
+	print("NPC spawning complete: %d farmers, %d nobles, %d woodcutters" % [farmer_count, noble_count, woodcutter_count])
 
 # ---------- wheat tile painting ----------
 
@@ -1051,3 +1078,94 @@ func _update_market_display() -> void:
 		if child.is_in_group("market") and child.has_method("update_stock_display"):
 			child.update_stock_display(market_wheat_stock)
 			break
+
+# ---------- economy simulation setup ----------
+
+func _setup_economy_simulation() -> void:
+	# Remove existing simulation
+	if economy_simulation:
+		economy_simulation.queue_free()
+		economy_simulation = null
+
+	# Create new simulation
+	economy_simulation = EconomySimulation.new()
+	economy_simulation.name = "EconomySimulation"
+	add_child(economy_simulation)
+
+	# Connect signals
+	economy_simulation.npc_born.connect(_on_npc_born)
+	economy_simulation.npc_died.connect(_on_npc_died)
+	economy_simulation.month_changed.connect(_on_month_changed)
+
+	print("Economy simulation initialized")
+
+func _on_npc_born(new_npc_data: Dictionary, parent: Node) -> void:
+	# Spawn a new NPC from replication
+	var npc_instance = npc_scene.instantiate()
+	npc_instance.add_to_group("npcs")
+
+	# Find a house position near parent
+	var home_pos: Vector2 = parent.home_position
+
+	add_child(npc_instance)
+
+	# Initialize with resources from parent
+	var role: int = new_npc_data["role"]
+	npc_instance.initialize_with_resources(
+		role,
+		home_pos,
+		new_npc_data["food"],
+		new_npc_data["wood"],
+		new_npc_data["gold"]
+	)
+
+	# Try to assign work based on role
+	if role == 0:  # FARMER
+		# Find unassigned farm
+		for plot in all_plots:
+			if plot.type == "farm" and not _is_farm_assigned(plot):
+				var farm_pos: Vector2 = map_to_local(plot.center)
+				var global_farm_pos: Vector2 = to_global(farm_pos)
+				npc_instance.set_work_position(global_farm_pos)
+				npc_farm_map[npc_instance] = plot
+				npc_instance.arrived_at_farm.connect(_on_npc_arrived_at_farm.bind(npc_instance))
+				break
+	elif role == 1:  # LUMBERJACK
+		# Find unassigned tree
+		for tree_cell in logging_tree_cells:
+			if not _is_tree_assigned(tree_cell):
+				var tree_pos: Vector2 = map_to_local(tree_cell)
+				var global_tree_pos: Vector2 = to_global(tree_pos)
+				npc_instance.set_work_position(global_tree_pos)
+				break
+
+	# Give market access
+	if market_position != Vector2.ZERO:
+		var global_market_pos: Vector2 = to_global(market_position)
+		npc_instance.set_market_position(global_market_pos)
+		npc_instance.wants_to_sell.connect(_on_npc_wants_to_sell)
+		npc_instance.wants_to_buy.connect(_on_npc_wants_to_buy)
+
+	print("New NPC born: %s (from %s)" % [npc_instance.job_name, parent.job_name])
+
+func _on_npc_died(npc: Node) -> void:
+	# Clean up dead NPC references
+	if npc_farm_map.has(npc):
+		npc_farm_map.erase(npc)
+	print("NPC died: %s" % npc.name)
+
+func _on_month_changed(year: int, month: int, season: String) -> void:
+	print("=== %s, Year %d, Month %d ===" % [season, year, month])
+
+func _is_farm_assigned(plot: Plot) -> bool:
+	for npc in npc_farm_map.keys():
+		if npc_farm_map[npc] == plot:
+			return true
+	return false
+
+func _is_tree_assigned(tree_cell: Vector2i) -> bool:
+	for child in get_children():
+		if child.is_in_group("npcs") and child.has_method("is_alive"):
+			if child.work_position == to_global(map_to_local(tree_cell)):
+				return true
+	return false
