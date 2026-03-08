@@ -348,7 +348,7 @@ func _balance_gold() -> void:
 			npc.gold -= int(npc.gold * 0.1)
 
 ## Check for NPC deaths due to starvation/freezing
-func _check_deaths(season: Season) -> void:
+func _check_deaths(_season: Season) -> void:
 	for npc in get_alive_npcs():
 		if npc.food < 0 or npc.wood < 0:
 			npc.set_alive(false)
@@ -356,7 +356,7 @@ func _check_deaths(season: Season) -> void:
 			print("NPC died: %s (food: %.1f, wood: %.1f)" % [npc.name, npc.food, npc.wood])
 
 ## Check if NPCs can replicate (give birth)
-func _check_replication(season: Season) -> void:
+func _check_replication(_season: Season) -> void:
 	var new_npcs: Array = []
 
 	for npc in get_alive_npcs():
@@ -387,7 +387,7 @@ func _check_replication(season: Season) -> void:
 		npc_born.emit(new_npc_data, new_npc_data["parent"])
 
 ## Calculate statistics for this month
-func _calculate_stats(pop_before: Dictionary, pop_after: Dictionary, season: Season) -> Dictionary:
+func _calculate_stats(pop_before: Dictionary, pop_after: Dictionary, _season: Season) -> Dictionary:
 	var stats := {
 		"year": year,
 		"month": month,

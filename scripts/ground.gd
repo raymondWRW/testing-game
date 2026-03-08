@@ -212,10 +212,11 @@ func generate(town: TownData = null) -> void:
 		var center_cell := Vector2i(width / 2, height / 2)
 		player.global_position = to_global(map_to_local(center_cell))
 
-	# Add collision to house walls, market, and trees
+	# Add collision to house walls, market, trees, and map boundaries
 	_add_house_collisions()
 	_add_market_collision()
 	_add_tree_collisions()
+	_add_map_boundary_collisions()
 
 	# Spawn house and market visuals
 	_spawn_houses()
@@ -543,8 +544,8 @@ func _get_road_tile_for_cell(cell: Vector2i) -> Vector2i:
 	var right := road_cells.has(cell + Vector2i(1, 0))
 
 	# Count neighbors
-	var h_neighbors := int(left) + int(right)
-	var v_neighbors := int(up) + int(down)
+	var _h_neighbors := int(left) + int(right)
+	var _v_neighbors := int(up) + int(down)
 
 	# Corners (only 2 adjacent neighbors)
 	if not up and not left and down and right:
@@ -679,7 +680,7 @@ func _add_tree_collisions() -> void:
 
 		var shape := CollisionShape2D.new()
 		var circle := CircleShape2D.new()
-		circle.radius = tile_size.x * 0.4  # Slightly smaller than tile
+		circle.radius = tile_size.x * 0.8  # Match A* padding better (1 tile padding)
 		shape.shape = circle
 
 		body.add_child(shape)
@@ -789,7 +790,7 @@ func _add_market_collision() -> void:
 
 	var rect: Rect2i = market_plot.rect
 	var top_left := map_to_local(rect.position) - Vector2(tile_size) / 2
-	var size := Vector2(rect.size) * Vector2(tile_size)
+	var _size := Vector2(rect.size) * Vector2(tile_size)
 
 	# Market is open (no walls), but add a small collision around the stall
 	# Just mark the center area as collision-free for NPCs to enter
@@ -797,6 +798,59 @@ func _add_market_collision() -> void:
 
 	body.position = top_left
 	add_child(body)
+
+func _add_map_boundary_collisions() -> void:
+	# Remove existing boundary collisions (in case of regeneration)
+	for child in get_children():
+		if child.is_in_group("map_boundary"):
+			child.queue_free()
+
+	var tile_size := tile_set.tile_size
+	var wall_thickness: float = tile_size.x * 2  # Thick walls to prevent escape
+	var map_width: float = width * tile_size.x
+	var map_height: float = height * tile_size.y
+
+	# Get the top-left corner of the map in local coordinates
+	var map_origin := map_to_local(Vector2i(0, 0)) - Vector2(tile_size) / 2
+
+	var body := StaticBody2D.new()
+	body.add_to_group("map_boundary")
+
+	# Top wall
+	var top_shape := CollisionShape2D.new()
+	var top_rect := RectangleShape2D.new()
+	top_rect.size = Vector2(map_width + wall_thickness * 2, wall_thickness)
+	top_shape.shape = top_rect
+	top_shape.position = Vector2(map_width / 2, -wall_thickness / 2)
+	body.add_child(top_shape)
+
+	# Bottom wall
+	var bottom_shape := CollisionShape2D.new()
+	var bottom_rect := RectangleShape2D.new()
+	bottom_rect.size = Vector2(map_width + wall_thickness * 2, wall_thickness)
+	bottom_shape.shape = bottom_rect
+	bottom_shape.position = Vector2(map_width / 2, map_height + wall_thickness / 2)
+	body.add_child(bottom_shape)
+
+	# Left wall
+	var left_shape := CollisionShape2D.new()
+	var left_rect := RectangleShape2D.new()
+	left_rect.size = Vector2(wall_thickness, map_height + wall_thickness * 2)
+	left_shape.shape = left_rect
+	left_shape.position = Vector2(-wall_thickness / 2, map_height / 2)
+	body.add_child(left_shape)
+
+	# Right wall
+	var right_shape := CollisionShape2D.new()
+	var right_rect := RectangleShape2D.new()
+	right_rect.size = Vector2(wall_thickness, map_height + wall_thickness * 2)
+	right_shape.shape = right_rect
+	right_shape.position = Vector2(map_width + wall_thickness / 2, map_height / 2)
+	body.add_child(right_shape)
+
+	body.position = map_origin
+	add_child(body)
+	print("Map boundary collisions added. Map size: %d x %d tiles" % [width, height])
 
 # ---------- house spawning ----------
 
@@ -806,7 +860,7 @@ func _spawn_houses() -> void:
 		if child.is_in_group("houses"):
 			child.queue_free()
 
-	var tile_size := tile_set.tile_size
+	var _tile_size := tile_set.tile_size
 
 	for plot in all_plots:
 		if plot.type != "house":
@@ -898,7 +952,7 @@ func _setup_navigation() -> void:
 
 # Get path from one position to another using grid-based A*
 func get_grid_path(from_pos: Vector2, to_pos: Vector2) -> PackedVector2Array:
-	var tile_size := tile_set.tile_size
+	var _tile_size := tile_set.tile_size
 
 	# Convert world positions to grid cells
 	var from_cell := local_to_map(to_local(from_pos))
@@ -916,15 +970,13 @@ func get_grid_path(from_pos: Vector2, to_pos: Vector2) -> PackedVector2Array:
 	if astar_grid.is_point_solid(to_cell):
 		to_cell = _find_nearest_walkable(to_cell)
 
-	# Get path in grid coordinates
-	var grid_path := astar_grid.get_point_path(from_cell, to_cell)
+	# Get path - AStarGrid2D returns positions already in local space (cell × cell_size)
+	var local_path := astar_grid.get_point_path(from_cell, to_cell)
 
-	# Convert to world positions
+	# Convert to global positions (only to_global needed, NOT map_to_local)
 	var world_path := PackedVector2Array()
-	for cell in grid_path:
-		var local_pos := map_to_local(Vector2i(cell))
-		var global_pos := to_global(local_pos)
-		world_path.append(global_pos)
+	for local_pos in local_path:
+		world_path.append(to_global(local_pos))
 
 	return world_path
 
@@ -940,6 +992,63 @@ func _find_nearest_walkable(cell: Vector2i) -> Vector2i:
 					if not astar_grid.is_point_solid(check):
 						return check
 	return cell  # Fallback to original
+
+# ---------- Grid helper methods for NPCs ----------
+
+## Check if a grid cell is walkable (not solid in A* grid)
+func is_cell_walkable(cell: Vector2i) -> bool:
+	if cell.x < 0 or cell.x >= width or cell.y < 0 or cell.y >= height:
+		return false
+	if astar_grid == null:
+		return true  # Grid not ready yet, assume walkable
+	return not astar_grid.is_point_solid(cell)
+
+## Convert world position to grid cell
+func world_to_cell(world_pos: Vector2) -> Vector2i:
+	var local_pos := to_local(world_pos)
+	return local_to_map(local_pos)
+
+## Convert grid cell to world position (center of cell)
+func cell_to_world(cell: Vector2i) -> Vector2:
+	var local_pos := map_to_local(cell)
+	return to_global(local_pos)
+
+## Get map bounds as Rect2i
+func get_map_bounds() -> Rect2i:
+	return Rect2i(0, 0, width, height)
+
+## Clamp a world position to be within map bounds
+func clamp_to_map(world_pos: Vector2) -> Vector2:
+	var cell := world_to_cell(world_pos)
+	# Only clamp if actually outside map bounds, otherwise return original position
+	if cell.x >= 0 and cell.x < width and cell.y >= 0 and cell.y < height:
+		return world_pos  # Already inside bounds, no clamping needed
+	# Outside bounds - clamp to nearest valid cell center
+	cell.x = clampi(cell.x, 0, width - 1)
+	cell.y = clampi(cell.y, 0, height - 1)
+	return cell_to_world(cell)
+
+## Find a valid walkable cell near the given cell (for stuck recovery)
+func find_walkable_neighbor(cell: Vector2i) -> Vector2i:
+	# Check 8 directions (cardinal + diagonal)
+	var directions := [
+		Vector2i(0, -1),   # up
+		Vector2i(0, 1),    # down
+		Vector2i(-1, 0),   # left
+		Vector2i(1, 0),    # right
+		Vector2i(-1, -1),  # top-left
+		Vector2i(1, -1),   # top-right
+		Vector2i(-1, 1),   # bottom-left
+		Vector2i(1, 1),    # bottom-right
+	]
+
+	for dir in directions:
+		var neighbor: Vector2i = cell + dir
+		if is_cell_walkable(neighbor):
+			return neighbor
+
+	# No walkable neighbor found, try expanding search
+	return _find_nearest_walkable(cell)
 
 # ---------- NPC spawning ----------
 
@@ -967,14 +1076,22 @@ func _spawn_npcs() -> void:
 
 	# Track which logging trees have been assigned
 	var available_logging_trees := logging_tree_cells.duplicate()
-	var woodcutter_index := 0
+	var _woodcutter_index := 0
 
 	# Calculate how many of each type to spawn
 	# Priority: farmers (one per farm), then nobles, then woodcutters
 	var num_farmers := mini(farm_plots.size(), house_plots.size())
 	var remaining_houses := house_plots.size() - num_farmers
 	var actual_nobles := mini(num_nobles, remaining_houses)
-	var num_woodcutters := remaining_houses - actual_nobles
+	var _num_woodcutters := remaining_houses - actual_nobles
+
+	# DEBUG: Limit to 1 farmer only for easier debugging
+	var debug_single_npc := false
+	if debug_single_npc:
+		num_farmers = mini(1, num_farmers)
+		actual_nobles = 0
+		_num_woodcutters = 0
+		house_plots = house_plots.slice(0, 1)  # Only use first house
 
 	# Spawn one NPC per house
 	var tile_size := tile_set.tile_size
@@ -991,8 +1108,8 @@ func _spawn_npcs() -> void:
 		var door_pos: Vector2 = map_to_local(house_plot.door_position)
 		var house_center: Vector2 = map_to_local(house_plot.center)
 		var door_direction := (door_pos - house_center).normalized()
-		# Offset 2 tiles away from the door, outside the house
-		var home_pos: Vector2 = door_pos + door_direction * (tile_size.x * 2)
+		# Offset 4 tiles away from the door, outside the house and A* padding (2 tile padding)
+		var home_pos: Vector2 = door_pos + door_direction * (tile_size.x * 4)
 
 		# Add to scene first
 		add_child(npc_instance)
@@ -1054,7 +1171,7 @@ func _paint_wheat_on_farm(farm_rect: Rect2i) -> void:
 
 # ---------- market trading ----------
 
-func _on_npc_wants_to_sell(npc: Node, wheat_amount: int) -> void:
+func _on_npc_wants_to_sell(_npc: Node, wheat_amount: int) -> void:
 	# Farmer is selling wheat to the market
 	market_wheat_stock += wheat_amount
 	_update_market_display()
@@ -1169,3 +1286,130 @@ func _is_tree_assigned(tree_cell: Vector2i) -> bool:
 			if child.work_position == to_global(map_to_local(tree_cell)):
 				return true
 	return false
+
+# -------------------- State Serialization for Persistence --------------------
+
+## Get all current NPC states for serialization
+func get_npc_states() -> Array[Dictionary]:
+	var states: Array[Dictionary] = []
+	for child in get_children():
+		if child.is_in_group("npcs"):
+			states.append(_serialize_npc_state(child))
+	return states
+
+## Get economy simulation state for serialization
+func get_economy_state() -> Dictionary:
+	if not economy_simulation:
+		return {}
+	return {
+		"year": economy_simulation.year,
+		"month": economy_simulation.month,
+		"total_months": economy_simulation.total_months,
+		"auto_simulate": economy_simulation.auto_simulate,
+		"seconds_per_month": economy_simulation.seconds_per_month
+	}
+
+## Restore NPCs from saved state
+func restore_npc_states(states: Array[Dictionary]) -> void:
+	# Clear existing NPCs
+	for child in get_children():
+		if child.is_in_group("npcs"):
+			child.queue_free()
+
+	await get_tree().process_frame
+	npc_farm_map.clear()
+
+	# Recreate NPCs from state
+	for state in states:
+		var npc := npc_scene.instantiate()
+		npc.add_to_group("npcs")
+		add_child(npc)
+		_deserialize_npc_state(npc, state)
+
+		# Register with economy simulation
+		if economy_simulation:
+			economy_simulation.register_npc(npc)
+
+		# Re-establish farm mapping if farmer
+		if state.get("job", 0) == 0:  # Job.FARMER
+			_reassign_farmer_to_farm(npc, state.get("work_position", Vector2.ZERO))
+
+		# Connect market signals
+		if market_position != Vector2.ZERO:
+			npc.set_market_position(to_global(market_position))
+			if not npc.wants_to_sell.is_connected(_on_npc_wants_to_sell):
+				npc.wants_to_sell.connect(_on_npc_wants_to_sell)
+			if not npc.wants_to_buy.is_connected(_on_npc_wants_to_buy):
+				npc.wants_to_buy.connect(_on_npc_wants_to_buy)
+
+	print("Restored %d NPCs from saved state" % states.size())
+
+## Restore economy simulation state
+func restore_economy_state(state: Dictionary) -> void:
+	if not economy_simulation or state.is_empty():
+		return
+
+	economy_simulation.year = state.get("year", 1)
+	economy_simulation.month = state.get("month", 1)
+	economy_simulation.total_months = state.get("total_months", 0)
+	economy_simulation.auto_simulate = state.get("auto_simulate", true)
+	economy_simulation.seconds_per_month = state.get("seconds_per_month", 10.0)
+
+	print("Restored economy state: Year %d, Month %d" % [economy_simulation.year, economy_simulation.month])
+
+func _serialize_npc_state(npc: Node) -> Dictionary:
+	return {
+		"job": npc.job,
+		"job_name": npc.job_name,
+		"home_position": npc.home_position,
+		"work_position": npc.work_position,
+		"market_position": npc.market_position,
+		"has_work": npc.has_work,
+		"has_market": npc.has_market,
+		"food": npc.food,
+		"wood": npc.wood,
+		"gold": npc.gold,
+		"alive": npc._alive,
+		"inventory": npc.inventory.duplicate(),
+		"state": npc._state,
+		"global_position": npc.global_position
+	}
+
+func _deserialize_npc_state(npc: Node, state: Dictionary) -> void:
+	npc.job = state.get("job", 0)
+	npc.job_name = state.get("job_name", "Unknown")
+	npc.home_position = state.get("home_position", Vector2.ZERO)
+	npc.work_position = state.get("work_position", Vector2.ZERO)
+	npc.market_position = state.get("market_position", Vector2.ZERO)
+	npc.has_work = state.get("has_work", false)
+	npc.has_market = state.get("has_market", false)
+	npc.food = state.get("food", 100.0)
+	npc.wood = state.get("wood", 50.0)
+	npc.gold = state.get("gold", 50.0)
+	npc._alive = state.get("alive", true)
+	npc.inventory = state.get("inventory", {"wheat": 0, "wood": 0}).duplicate()
+	npc._state = state.get("state", 0)
+	npc.global_position = state.get("global_position", npc.home_position)
+
+	# If dead, apply visual indication
+	if not npc._alive:
+		npc.modulate = Color(0.3, 0.3, 0.3, 0.5)
+		npc.set_physics_process(false)
+
+func _reassign_farmer_to_farm(npc: Node, work_pos: Vector2) -> void:
+	# Find the farm plot closest to the work position
+	var best_plot: Plot = null
+	var best_dist: float = INF
+
+	for plot in all_plots:
+		if plot.type == "farm":
+			var farm_world_pos: Vector2 = to_global(map_to_local(plot.center))
+			var dist := farm_world_pos.distance_to(work_pos)
+			if dist < best_dist:
+				best_dist = dist
+				best_plot = plot
+
+	if best_plot and best_dist < 100.0:  # Within reasonable distance
+		npc_farm_map[npc] = best_plot
+		if not npc.arrived_at_farm.is_connected(_on_npc_arrived_at_farm.bind(npc)):
+			npc.arrived_at_farm.connect(_on_npc_arrived_at_farm.bind(npc))

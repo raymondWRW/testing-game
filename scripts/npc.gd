@@ -12,10 +12,13 @@ signal wants_to_buy(npc: Node, wood_amount: int)
 
 @onready var inventory_label: Label = $InventoryLabel
 
-# Grid-based pathfinding
+# Grid-based pathfinding and movement
 var _ground_node: Node = null
-var _current_path: PackedVector2Array = []
+var _current_path: Array[Vector2i] = []  # Path as grid cells
 var _path_index: int = 0
+var _current_cell: Vector2i = Vector2i.ZERO  # Current grid cell
+var _target_cell: Vector2i = Vector2i.ZERO   # Cell we're moving toward
+var _moving_to_cell: bool = false            # Are we in transit between cells?
 
 # Job assignment
 var job: Job = Job.FARMER
@@ -143,7 +146,14 @@ func _init_navigation() -> void:
 
 	_nav_ready = true
 	_last_position = global_position
-	print("NPC [%s] ready at position: %s, home: %s, work: %s" % [job_name, global_position, home_position, work_position])
+
+	# Initialize current cell from position
+	if _ground_node and _ground_node.has_method("world_to_cell"):
+		_current_cell = _ground_node.world_to_cell(global_position)
+		# Snap to cell center
+		global_position = _ground_node.cell_to_world(_current_cell)
+
+	print("NPC [%s] ready at cell: %s, home: %s, work: %s" % [job_name, _current_cell, home_position, work_position])
 	_update_inventory_display()
 
 func initialize_farmer(home_pos: Vector2, farm_pos: Vector2) -> void:
@@ -239,6 +249,7 @@ func _physics_process(delta: float) -> void:
 
 func _process_idle_home(delta: float) -> void:
 	velocity = Vector2.ZERO
+	_moving_to_cell = false
 	_idle_timer -= delta
 
 	if _idle_timer <= 0.0:
@@ -259,6 +270,7 @@ func _process_idle_home(delta: float) -> void:
 			_go_to_market()
 		elif has_work:
 			_state = State.WALKING_TO_WORK
+			_moving_to_cell = false
 			_request_path(work_position)
 			_stuck_timer = 0.0
 			_last_position = global_position
@@ -279,16 +291,25 @@ func _should_go_to_market() -> bool:
 
 func _go_to_market() -> void:
 	_state = State.WALKING_TO_MARKET
+	_moving_to_cell = false
 	_request_path(market_position)
 	_stuck_timer = 0.0
 	_last_position = global_position
 
 func _process_walking_to_work(delta: float) -> void:
-	if _is_path_finished() or global_position.distance_to(work_position) < 16.0:
+	# Check arrival using both path completion and cell proximity
+	var work_cell := Vector2i.ZERO
+	if _ground_node and _ground_node.has_method("world_to_cell"):
+		work_cell = _ground_node.world_to_cell(work_position)
+
+	var at_work := _is_path_finished() or _current_cell == work_cell or global_position.distance_to(work_position) < 16.0
+
+	if at_work:
 		velocity = Vector2.ZERO
+		_moving_to_cell = false
 		_state = State.WORKING
 		_work_timer = randf_range(WORK_TIME_MIN, WORK_TIME_MAX)
-		print("NPC [%s] arrived at work, starting work timer: %.1f" % [job_name, _work_timer])
+		print("NPC [%s] arrived at work (cell %s), starting work timer: %.1f" % [job_name, _current_cell, _work_timer])
 
 		# Emit signal for farmers (to paint wheat)
 		if job == Job.FARMER:
@@ -300,6 +321,7 @@ func _process_walking_to_work(delta: float) -> void:
 
 func _process_working(delta: float) -> void:
 	velocity = Vector2.ZERO
+	_moving_to_cell = false
 	_work_timer -= delta
 
 	if _work_timer <= 0.0:
@@ -315,22 +337,38 @@ func _process_working(delta: float) -> void:
 			_work_timer = randf_range(WORK_TIME_MIN, WORK_TIME_MAX)
 
 func _process_walking_home(delta: float) -> void:
-	if _is_path_finished() or global_position.distance_to(home_position) < 16.0:
+	# Check arrival using both path completion and cell proximity
+	var home_cell := Vector2i.ZERO
+	if _ground_node and _ground_node.has_method("world_to_cell"):
+		home_cell = _ground_node.world_to_cell(home_position)
+
+	var at_home := _is_path_finished() or _current_cell == home_cell or global_position.distance_to(home_position) < 16.0
+
+	if at_home:
 		velocity = Vector2.ZERO
+		_moving_to_cell = false
 		_state = State.IDLE_HOME
 		_idle_timer = randf_range(IDLE_HOME_MIN, IDLE_HOME_MAX)
-		print("NPC [%s] arrived home, idle timer: %.1f" % [job_name, _idle_timer])
+		print("NPC [%s] arrived home (cell %s), idle timer: %.1f" % [job_name, _current_cell, _idle_timer])
 		return
 
 	_check_stuck(delta)
 	_move_toward_next_path_point()
 
 func _process_walking_to_market(delta: float) -> void:
-	if _is_path_finished() or global_position.distance_to(market_position) < 16.0:
+	# Check arrival using both path completion and cell proximity
+	var market_cell := Vector2i.ZERO
+	if _ground_node and _ground_node.has_method("world_to_cell"):
+		market_cell = _ground_node.world_to_cell(market_position)
+
+	var at_market := _is_path_finished() or _current_cell == market_cell or global_position.distance_to(market_position) < 16.0
+
+	if at_market:
 		velocity = Vector2.ZERO
+		_moving_to_cell = false
 		_state = State.AT_MARKET
 		_work_timer = MARKET_TIME
-		print("NPC [%s] arrived at market" % [job_name])
+		print("NPC [%s] arrived at market (cell %s)" % [job_name, _current_cell])
 		return
 
 	_check_stuck(delta)
@@ -338,6 +376,7 @@ func _process_walking_to_market(delta: float) -> void:
 
 func _process_at_market(delta: float) -> void:
 	velocity = Vector2.ZERO
+	_moving_to_cell = false
 	_work_timer -= delta
 
 	if _work_timer <= 0.0:
@@ -377,10 +416,11 @@ func spend_wood(amount: int) -> void:
 
 func _go_home() -> void:
 	_state = State.WALKING_HOME
+	_moving_to_cell = false
 	_request_path(home_position)
 	_stuck_timer = 0.0
 	_last_position = global_position
-	print("NPC [%s] going home from %s to %s" % [job_name, global_position, home_position])
+	print("NPC [%s] going home from cell %s to %s" % [job_name, _current_cell, home_position])
 
 func _collect_resource() -> void:
 	var item: String
@@ -421,72 +461,145 @@ func _check_stuck(delta: float) -> void:
 	if _stuck_timer >= STUCK_THRESHOLD:
 		var distance_moved := global_position.distance_to(_last_position)
 		if distance_moved < STUCK_DISTANCE:
-			print("NPC [%s] appears stuck, trying to unstuck" % [job_name])
+			print("NPC [%s] appears stuck at cell %s, finding escape" % [job_name, _current_cell])
 			_handle_stuck()
 		_stuck_timer = 0.0
 		_last_position = global_position
 
 func _handle_stuck() -> void:
-	# Try a random direction to escape
-	var escape_angle := randf() * TAU  # Random angle 0 to 2*PI
-	var escape_dir := Vector2(cos(escape_angle), sin(escape_angle))
-	velocity = escape_dir * speed
-	move_and_slide()
+	# Find a valid walkable neighbor cell instead of random direction
+	if not _ground_node or not _ground_node.has_method("find_walkable_neighbor"):
+		return
 
-	# Skip to next path point
+	# First, teleport to a walkable cell if we're in a blocked one
+	if _ground_node.has_method("is_cell_walkable") and not _ground_node.is_cell_walkable(_current_cell):
+		var escape_cell: Vector2i = _ground_node.find_walkable_neighbor(_current_cell)
+		if escape_cell != _current_cell:
+			print("NPC [%s] stuck in blocked cell %s, teleporting to %s" % [job_name, _current_cell, escape_cell])
+			_current_cell = escape_cell
+			global_position = _ground_node.cell_to_world(escape_cell)
+
+	# Skip to next path point if we have one
 	if _path_index < _current_path.size() - 1:
 		_path_index += 1
+		if _path_index < _current_path.size():
+			_target_cell = _current_path[_path_index]
+			_moving_to_cell = true
+			print("NPC [%s] skipping to path index %d, target cell %s" % [job_name, _path_index, _target_cell])
 
-# Request a new path from current position to target
+# Request a new path from current position to target (stores as grid cells)
 func _request_path(target: Vector2) -> void:
 	_current_path.clear()
 	_path_index = 0
+	_moving_to_cell = false
 
-	if _ground_node and _ground_node.has_method("get_grid_path"):
-		_current_path = _ground_node.get_grid_path(global_position, target)
-		if _current_path.size() > 0:
-			print("NPC [%s] got path with %d points" % [job_name, _current_path.size()])
-		else:
-			print("NPC [%s] failed to get path to %s" % [job_name, target])
-	else:
+	if not _ground_node:
 		print("NPC [%s] no ground node for pathfinding!" % [job_name])
+		return
+
+	if not _ground_node.has_method("world_to_cell"):
+		print("NPC [%s] ground node missing grid methods!" % [job_name])
+		return
+
+	# Check if NPC is in a blocked cell (e.g., inside a house)
+	# If so, teleport to nearest walkable cell first
+	_current_cell = _ground_node.world_to_cell(global_position)
+	var is_walkable_method: bool = _ground_node.has_method("is_cell_walkable")
+	var is_blocked: bool = is_walkable_method and not _ground_node.is_cell_walkable(_current_cell)
+	print("NPC [%s] requesting path - current cell %s, blocked: %s" % [job_name, _current_cell, is_blocked])
+
+	if is_blocked:
+		var walkable_cell: Vector2i = _ground_node.find_walkable_neighbor(_current_cell)
+		if walkable_cell != _current_cell:
+			print("NPC [%s] teleporting from blocked cell %s to walkable cell %s" % [job_name, _current_cell, walkable_cell])
+			_current_cell = walkable_cell
+			global_position = _ground_node.cell_to_world(walkable_cell)
+
+	# Get path as grid cells
+	var target_cell: Vector2i = _ground_node.world_to_cell(target)
+	var world_path: PackedVector2Array = _ground_node.get_grid_path(global_position, target)
+
+	# Convert world path to cell path
+	for world_pos in world_path:
+		var cell: Vector2i = _ground_node.world_to_cell(world_pos)
+		# Avoid duplicates
+		if _current_path.size() == 0 or _current_path[-1] != cell:
+			_current_path.append(cell)
+
+	if _current_path.size() > 0:
+		print("NPC [%s] got grid path with %d cells" % [job_name, _current_path.size()])
+		# Start moving to first cell if different from current
+		if _current_path[0] != _current_cell:
+			_target_cell = _current_path[0]
+			_moving_to_cell = true
+		elif _current_path.size() > 1:
+			_path_index = 1
+			_target_cell = _current_path[1]
+			_moving_to_cell = true
+	else:
+		print("NPC [%s] failed to get path to cell %s" % [job_name, target_cell])
 
 func _is_path_finished() -> bool:
-	return _path_index >= _current_path.size()
+	return _path_index >= _current_path.size() and not _moving_to_cell
 
 func _move_toward_next_path_point() -> void:
-	# Check if we have a valid path
-	if _current_path.size() == 0 or _path_index >= _current_path.size():
+	if not _ground_node:
 		velocity = Vector2.ZERO
 		return
 
-	var next_pos := _current_path[_path_index]
-	var distance := global_position.distance_to(next_pos)
-
-	# If we're close enough to current waypoint, move to next
-	if distance < 8.0:
-		_path_index += 1
+	# If we're not currently moving to a cell, get the next one
+	if not _moving_to_cell:
 		if _path_index >= _current_path.size():
 			velocity = Vector2.ZERO
 			return
-		next_pos = _current_path[_path_index]
 
-	var direction := (next_pos - global_position).normalized()
+		_target_cell = _current_path[_path_index]
 
-	# Debug navigation (less frequent)
-	if Engine.get_physics_frames() % 180 == 0:
-		print("Path debug [%s] - pos: %s, next: %s, index: %d/%d" % [
-			job_name,
-			global_position,
-			next_pos,
-			_path_index,
-			_current_path.size()
-		])
+		# Validate target cell is walkable
+		if _ground_node.has_method("is_cell_walkable") and not _ground_node.is_cell_walkable(_target_cell):
+			print("NPC [%s] target cell %s is blocked, skipping" % [job_name, _target_cell])
+			# Skip this cell and try next
+			_path_index += 1
+			if _path_index >= _current_path.size():
+				velocity = Vector2.ZERO
+				return
+			_target_cell = _current_path[_path_index]
 
-	# Move toward next waypoint
+		_moving_to_cell = true
+
+	# Get world position of target cell
+	var target_world: Vector2 = _ground_node.cell_to_world(_target_cell)
+	var distance := global_position.distance_to(target_world)
+
+	# Check if we've reached the target cell
+	if distance < 4.0:  # Tight threshold for cell-to-cell movement
+		# Snap to cell center
+		global_position = target_world
+		_current_cell = _target_cell
+		_moving_to_cell = false
+		_path_index += 1
+		velocity = Vector2.ZERO
+		return
+
+	# Move toward target cell center
+	var direction := (target_world - global_position).normalized()
+
 	if direction.is_finite() and direction.length_squared() > 0.01:
 		velocity = direction * speed
+		# Debug movement (less frequent)
+		if Engine.get_physics_frames() % 120 == 0:
+			print("NPC [%s] moving: pos=%s, target=%s, vel=%s, dist=%.1f" % [
+				job_name, global_position, target_world, velocity, distance
+			])
 	else:
 		velocity = Vector2.ZERO
+		print("NPC [%s] invalid direction: pos=%s, target=%s" % [job_name, global_position, target_world])
 
 	move_and_slide()
+
+	# Clamp position to map bounds as safety
+	if _ground_node.has_method("clamp_to_map"):
+		var clamped: Vector2 = _ground_node.clamp_to_map(global_position)
+		if clamped.distance_to(global_position) > 1.0:
+			global_position = clamped
+			_current_cell = _ground_node.world_to_cell(global_position)

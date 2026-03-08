@@ -122,8 +122,8 @@ func _update_speed_display() -> void:
 	var paused := " (PAUSED)" if not economy.auto_simulate else ""
 	speed_label.text = "Speed: %.1fx (%.0fs/month)%s" % [speed_multiplier, economy.seconds_per_month, paused]
 
-func _on_month_changed(year: int, month: int, season: String) -> void:
+func _on_month_changed(_year: int, _month: int, _season: String) -> void:
 	_update_display()
 
-func _on_stats_updated(stats: Dictionary) -> void:
+func _on_stats_updated(_stats: Dictionary) -> void:
 	_update_display()
